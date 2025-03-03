@@ -25,7 +25,7 @@ def test_merge_english_subtitles2(sample_subs2):
         False  # 终止合并
     ])
     
-    merged = optimizer.optimize(sample_subs2)
+    merged = optimizer.merge_srt(sample_subs2)
     
     # 验证合并结果
     assert len(merged) == 2, "应合并为1条完整字幕"
@@ -61,7 +61,7 @@ def test_merge_english_subtitles(sample_subs):
         False  # 终止合并
     ])
     
-    merged = optimizer.optimize(sample_subs)
+    merged = optimizer.merge_srt(sample_subs)
     
     # 验证合并结果
     assert len(merged) == 1, "应合并为1条完整字幕"
@@ -81,7 +81,7 @@ def test_max_merge_limit(sample_subs):
     optimizer = SubtitleOptimizer(max_merge_lines=2)
     optimizer._should_merge = Mock(side_effect=[True, True])
     
-    merged = optimizer.optimize(sample_subs)
+    merged = optimizer.merge_srt(sample_subs)
     assert len(merged) == 3
     assert merged[0].text == "Our intense discussion that day effectively"
 
@@ -89,11 +89,11 @@ def test_max_merge_limit(sample_subs):
 def test_empty_subtitles():
     optimizer = SubtitleOptimizer()
     subs = pysrt.SubRipFile()
-    merged = optimizer.optimize(subs)
+    merged = optimizer.merge_srt(subs)
     assert len(merged) == 0
 
 def test_single_subtitle(sample_subs):
     optimizer = SubtitleOptimizer()
-    merged = optimizer.optimize(sample_subs[:1])
+    merged = optimizer.merge_srt(sample_subs[:1])
     assert len(merged) == 1
     assert merged[0].text == "Our intense discussion"
