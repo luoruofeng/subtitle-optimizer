@@ -9,7 +9,8 @@ from subtitle_optimizer.exceptions import LanguageMismatchError
 def call_llm_api(
     prompt: str,
     api_key: Optional[str] = None,
-    model: str = "deepseek-r1-distill-llama-70b",  
+    # model: str = "deepseek-r1-distill-llama-70b",  
+    model: str = "qwen-max",
     system_prompt: str = "你是一个专业的AI助手，用简洁准确的答案回答问题",
     temperature: float = 0.3,
     max_tokens: int = 2000
