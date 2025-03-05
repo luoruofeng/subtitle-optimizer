@@ -31,14 +31,42 @@ class SubtitleOptimizer:
         self.whisper_model = whisper.load_model("medium.en")
 
     ####################通过txt生成SRT文件######################
+    @staticmethod
+    def _split_sentences(content):
+        pattern = r'([，。！？；：、…\u2026.!?;:])[\s]*'
+        result = re.split(pattern, content)
+        
+        sentences = []
+        # 初步合并句子与标点
+        for i in range(0, len(result), 2):
+            combined = (result[i] + (result[i+1] if i+1 < len(result) else '')).strip()
+            if combined:
+                sentences.append(combined)
+        
+        # 处理单独标点合并到前一句
+        merged = []
+        for sentence in sentences:
+            # 判断当前句子是否仅由标点构成
+            if re.fullmatch(r'^[，。！？；：、….!?;:]+$', sentence):
+                # 若前一句存在且非标点，则合并
+                if merged and not re.fullmatch(r'^[，。！？；：、….!?;:]+$', merged[-1]):
+                    merged[-1] += sentence
+                else:
+                    merged.append(sentence)
+            else:
+                merged.append(sentence)
+        return merged
+
+
     def _generate_srt_from_txt_process_file_pair(self, txt_path: str, mp4_path: str, segments_path: str = None):
         """处理单个文件对，支持可选的分段时间戳文件"""
         # 读取文本内容（逻辑不变）
         with open(txt_path, "r", encoding="utf-8") as f:
             content = f.read()
-        pattern = r'[，。！？；：、…\u2026\.!?;:]+[\s]*'
-        sentences = [s.strip() for s in re.split(pattern, content) if s.strip()]
-        
+        sentences = SubtitleOptimizer._split_sentences(content)
+        print(f"✅ 提取到 {len(sentences)} 个句子")
+        print(f"\nsentences:{sentences}\n")
+
         # 时间戳来源判断
         if segments_path and os.path.exists(segments_path):
             # 从文件加载预生成的时间戳
@@ -67,15 +95,84 @@ class SubtitleOptimizer:
             segments = result["segments"]
         print(f"✅ 提取到 {len(segments)} 个时间戳段")
         
-        # 生成SRT内容
-        srt_content = []
-        for idx, segment in enumerate(segments, 1):
-            start = self._format_timestamp(segment["start"])
-            end = self._format_timestamp(segment["end"])
-            text = sentences[idx-1] if idx-1 < len(sentences) else segment.get("text", "")
-            srt_content.append(f"{idx}\n{start} --> {end}\n{text}\n")
-            print(f"✅ 处理_generate_srt_from_txt_process_file_pair完成：{idx}/{len(segments)}")
         
+        # 生成SRT内容
+        all_words = [word for segment in segments for word in segment.get("words", [])]
+        srt_content = []
+        current_word_idx = 0
+
+        for sentence in sentences:
+            # 新增标点规范化处理（解决中英文符号差异）
+            normalized_sentence = re.sub(r'[，,]', ',', sentence)  # 统一中文逗号为英文
+            sentence_words = normalized_sentence.split()
+            
+            matched = False
+            max_retry = 13  # 最大合并尝试次数[10](@ref)
+            
+            # 扩展匹配范围，考虑单词合并可能性
+            for i in range(current_word_idx, min(len(all_words), current_word_idx + 200)):
+                # 尝试合并1到13个单词的组合
+                for merge_count in range(1, max_retry + 1):
+                    if i + merge_count > len(all_words):
+                        break
+                    
+                    # 生成合并后的单词及时间戳
+                    merged_word = ''.join([all_words[idx]['word'].strip() for idx in range(i, i + merge_count)])
+                    merged_start = all_words[i]['start']
+                    merged_end = all_words[i + merge_count - 1]['end']
+                    
+                    # 规范化比较（忽略大小写和空格）
+                    if merged_word.lower() == sentence_words[0].lower():
+                        # 验证后续单词是否连续匹配
+                        full_match = True
+                        word_ptr = i + merge_count
+                        
+                        for word_idx in range(1, len(sentence_words)):
+                            # 继续尝试合并后续单词
+                            found = False
+                            for cnt in range(1, max_retry + 1):
+                                if word_ptr + cnt > len(all_words):
+                                    break
+                                
+                                next_merged = ''.join([all_words[idx]['word'].strip() 
+                                                    for idx in range(word_ptr, word_ptr + cnt)])
+                                
+                                if next_merged.lower() == sentence_words[word_idx].lower():
+                                    word_ptr += cnt
+                                    merged_end = all_words[word_ptr - 1]['end']
+                                    found = True
+                                    break
+                            
+                            if not found:
+                                full_match = False
+                                break
+                        
+                        if full_match:
+                            srt_content.append(
+                                f"{len(srt_content)+1}\n"
+                                f"{self._format_timestamp(merged_start)} --> {self._format_timestamp(merged_end)}\n"
+                                f"{sentence}\n"
+                            )
+                            current_word_idx = word_ptr
+                            matched = True
+                            break
+                    
+                    if matched:
+                        break
+                if matched:
+                    break
+
+            if not matched:
+                # 增强错误信息可读性
+                expected = '|'.join(sentence_words)
+                actual = '|'.join([w['word'] for w in all_words[current_word_idx:current_word_idx+20]])
+                raise ValueError(
+                    f"无法匹配句子：'{sentence}'\n"
+                    f"预期单词序列：{expected}\n"
+                    f"实际后续单词：{actual}"
+                )
+
+
         # 保存SRT文件
         srt_path = os.path.splitext(mp4_path)[0] + ".srt"
         with open(srt_path, "w", encoding="utf-8") as f:
