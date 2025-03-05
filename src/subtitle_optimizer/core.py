@@ -1,5 +1,8 @@
+import json
 import os
 import re
+import time
+import traceback
 from typing import List
 import numpy as np
 from pysrt import SubRipFile, SubRipItem
@@ -9,17 +12,186 @@ from subtitle_optimizer.exceptions import LanguageMismatchError
 import whisper
 from pydub import AudioSegment
 import torch
+from typing import Union, List, Tuple
 
 
 class SubtitleOptimizer:
     def __init__(self, api_key=None):
+        """
+        初始化 SubtitleOptimizer 类的实例。
+
+        参数:
+            api_key (str, 可选): 用于调用 LLM API 的 API 密钥。默认为 None。
+        """
         self.api_key = api_key
         # 初始化本地Whisper大模型
+        # 注释掉的代码表示使用 "large-v3" 版本的 Whisper 模型，该模型通常具有更高的精度，但可能需要更多的计算资源和时间。
         # self.whisper_model = whisper.load_model("large-v3")
+        # 使用 "medium.en" 版本的 Whisper 模型，该模型专为英语设计，在精度和性能之间取得了较好的平衡。
         self.whisper_model = whisper.load_model("medium.en")
 
+    ####################通过txt生成SRT文件######################
+    def _generate_srt_from_txt_process_file_pair(self, txt_path: str, mp4_path: str, segments_path: str = None):
+        """处理单个文件对，支持可选的分段时间戳文件"""
+        # 读取文本内容（逻辑不变）
+        with open(txt_path, "r", encoding="utf-8") as f:
+            content = f.read()
+        pattern = r'[，。！？；：、…\u2026\.!?;:]+[\s]*'
+        sentences = [s.strip() for s in re.split(pattern, content) if s.strip()]
         
+        # 时间戳来源判断
+        if segments_path and os.path.exists(segments_path):
+            # 从文件加载预生成的时间戳
+            try:
+                with open(segments_path, 'r', encoding='utf-8') as f:
+                    segments = json.load(f)  # 加载JSON数据
+            except json.JSONDecodeError:
+                print("错误：文件内容不是有效的JSON格式")
+                traceback.print_exc()
+            except PermissionError:
+                print("错误：无权限读取文件")
+                traceback.print_exc()
+            except Exception as e:
+                print(f"未知错误：{e}")
+                traceback.print_exc()
+        else:
+            # 通过Whisper生成时间戳
+            result = self.whisper_model.transcribe(
+                mp4_path,
+                word_timestamps=True,
+                language="en",
+                task='transcribe',
+                fp16=torch.cuda.is_available(),
+                initial_prompt=" ".join(sentences)
+            )
+            segments = result["segments"]
+        print(f"✅ 提取到 {len(segments)} 个时间戳段")
+        
+        # 生成SRT内容
+        srt_content = []
+        for idx, segment in enumerate(segments, 1):
+            start = self._format_timestamp(segment["start"])
+            end = self._format_timestamp(segment["end"])
+            text = sentences[idx-1] if idx-1 < len(sentences) else segment.get("text", "")
+            srt_content.append(f"{idx}\n{start} --> {end}\n{text}\n")
+            print(f"✅ 处理_generate_srt_from_txt_process_file_pair完成：{idx}/{len(segments)}")
+        
+        # 保存SRT文件
+        srt_path = os.path.splitext(mp4_path)[0] + ".srt"
+        with open(srt_path, "w", encoding="utf-8") as f:
+            f.write("\n".join(srt_content))
+        print(f"✅ SRT文件已保存至：{srt_path}")
 
+    def _generate_srt_from_txt_process_directory(self, folder_path: str):
+        """处理文件夹中的文件对"""
+        mp4_files = [f for f in os.listdir(folder_path) if f.endswith(".mp4")]
+        for mp4_file in mp4_files:
+            base_name = os.path.splitext(mp4_file)[0]
+            # 生成三种可能的相关文件路径
+            txt_path = os.path.join(folder_path, f"{base_name}.txt")
+            segments_path = os.path.join(folder_path, f"{base_name}_segments.txt")
+            mp4_path = os.path.join(folder_path, mp4_file)
+            
+            # 仅当txt文件存在时才处理
+            if os.path.exists(txt_path):
+                # 如果存在segments文件，则传递三元组
+                if os.path.exists(segments_path):
+                    self._generate_srt_from_txt_process_file_pair(txt_path, mp4_path, segments_path)
+                else:
+                    self._generate_srt_from_txt_process_file_pair(txt_path, mp4_path)
+            else:
+                raise FileNotFoundError(f"未找到对应的TXT文件：{txt_path}")
+            print(f"✅ 处理_generate_srt_from_txt_process_directory完成：{mp4_file}")
+
+    def generate_srt_from_folder(self, path: Union[str, Tuple[str, str], Tuple[str, str, str]]):
+        """
+        入口方法，支持三种参数格式：
+        1. 元组 (txt_path, mp4_path)
+        2. 元组 (txt_path, mp4_path, segments_path)
+        3. 文件夹路径
+        """
+        if isinstance(path, tuple):
+            if len(path) == 3:
+                self._generate_srt_from_txt_process_file_pair(*path)
+            else:
+                self._generate_srt_from_txt_process_file_pair(*path[:2])  # 兼容二元组
+        elif os.path.isdir(path):
+            try:
+                self._generate_srt_from_txt_process_directory(path)
+            except Exception as e:
+                print(f"❌ 处理文件夹_process_directory失败：{str(e)}")
+                traceback.print_exc()
+        else:
+            raise ValueError("无效的输入路径")
+        print(f"✅ SRT文件生成完成")
+
+    @staticmethod
+    def _format_timestamp(seconds: float) -> str:
+        """将秒数转换为SRT时间格式[4](@ref)"""
+        hours, remainder = divmod(seconds, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        return f"{int(hours):02}:{int(minutes):02}:{seconds:06.3f}".replace(".", ",")
+
+
+    ####################提取视频中的文本######################
+    def extract_text_to_txt(self, mp4_path: str) -> str:
+        """使用 Whisper 模型提取 MP4 文件中的英语文本，并保存为同名 TXT 文件
+        
+        参数:
+            mp4_path: 输入视频文件路径（支持绝对/相对路径）
+        
+        返回:
+            str: 提取的文本内容
+        
+        示例:
+            optimizer = SubtitleOptimizer()
+            text = optimizer.extract_text_to_txt("test_video.mp4")
+        """
+        try:
+            # 判断MP4文件是否存在
+            if not os.path.exists(mp4_path):
+                raise FileNotFoundError(f"未找到指定的MP4文件：{mp4_path}")
+
+            # 转录视频内容（自动提取音频）TODO
+            result = self.whisper_model.transcribe(
+                mp4_path, 
+                language="en", 
+                word_timestamps=True,
+                task='transcribe',
+                fp16=torch.cuda.is_available()
+            )
+            extracted_text = result.get("text", "")
+            segments = result.get("segments", [])  # 新增：获取分段信息
+            print(f"\nsegment:{segments}\n")
+            # 构建主文本输出路径
+            base_path = os.path.splitext(mp4_path)[0]
+            txt_path = f"{base_path}.txt"
+            segments_path = f"{base_path}_segments.txt"  # 新增：分段文件名
+
+            # 删除已存在的同名文件
+            for path in [txt_path, segments_path]:
+                if os.path.exists(path):
+                    os.remove(path)
+                    print(f"已删除现有文件：{path}")
+
+            # 写入主文本文件
+            with open(txt_path, 'w', encoding='utf-8') as f:
+                f.write(extracted_text)
+                print(f"✅ 主文本已保存至：{txt_path}")
+
+            # 新增：写入分段文本文件
+            if segments:
+                print(f"检测到分段信息，共 {len(segments)} 个片段")
+                with open(segments_path, 'w', encoding='utf-8') as seg_file:
+                    # 使用json.dump()将列表序列化为JSON格式写入文件
+                    json.dump(segments, seg_file, ensure_ascii=False, indent=4)
+                print(f"✅ 分段数据已JSON序列化保存至：{segments_path}")
+
+            return extracted_text
+            
+        except Exception as e:
+            print(f"❌ 转录失败：{str(e)}")
+            raise RuntimeError(f"视频转录失败: {str(e)}") from e
 
     ####################将字幕中的短句合并为长句######################
 
