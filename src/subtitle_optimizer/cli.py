@@ -11,6 +11,10 @@ def main():
     # 创建主解析器
     parser = argparse.ArgumentParser(prog="so", description="字幕优化工具")
     subparsers = parser.add_subparsers(dest="command", required=True, help="支持的子命令")
+    
+    # 添加子命令：process_srt_with_voice
+    process_srt_with_voice_parser = subparsers.add_parser("process-srt-with-voice", help="通过srt生成mp3")
+    process_srt_with_voice_parser.add_argument("-i", "--input", required=True, help="输入字幕文件路径")
 
     # 添加子命令：correct_spelling
     correct_parser = subparsers.add_parser("correct-spelling", help="拼写检查与修正")
@@ -18,6 +22,13 @@ def main():
     correct_parser.add_argument("-o", "--output", help="输出文件路径（默认覆盖原文件）")
     correct_parser.add_argument("--lang", default="en", help="语言类型（默认：英文）")
 
+    
+    # 添加子命令：adjust_video_speed
+    adjust_video_speed_parser = subparsers.add_parser("adjust-video-speed", help="视频变速")
+    adjust_video_speed_parser.add_argument("-i", "--input", required=True, help="输入mp4文件路径")
+    adjust_video_speed_parser.add_argument("-s", "--speed", required=False, default=0.9, type=float, help="速率（默认 0.9）")
+
+    
     # 添加子命令：merge_srt
     merge_parser = subparsers.add_parser("merge-srt", help="合并多个字幕文件")
     merge_parser.add_argument("-i", "--input", required=True, help="输入字幕文件路径（支持通配符）")
@@ -32,7 +43,7 @@ def main():
     # 添加子命令：add_translation
     add_translation_parser = subparsers.add_parser("add-translation", help="翻译字幕文件")
     add_translation_parser.add_argument("-i", "--input", required=True, help="输入字幕文件路径（支持通配符）")
-    add_translation_parser.add_argument("-o", "--output", required=True, help="合并后的输出文件路径")
+    add_translation_parser.add_argument("-o", "--output", required=False, help="合并后的输出文件路径")
 
     # 添加子命令：extract_text_to_txt
     extract_text_to_txt_parser = subparsers.add_parser("extract-text-to-txt", help="读取mp4中的文本到txt文件")
@@ -74,9 +85,21 @@ def main():
         extract_text_to_txt(args)
     elif args.command == "generate-srt-from-folder":
         handle_generate_srt_from_folder(args)
+    elif args.command == "process-srt-with-voice":
+        handle_process_srt_with_voice(args)
+    elif args.command == "adjust-video-speed":
+        handle_adjust_video_speed(args)
+
+def handle_adjust_video_speed(args):
+    print(f"🎥 视频变速处理：调整视频速率为{args.speed}\n输入={args.input}")
+    OPTIMIZER.adjust_video_speed(args.input,args.speed)
+
+def handle_process_srt_with_voice(args):
+    print(f"🔊 开始生成语音文件：将字幕文件转换为MP3音频\n输入={args.input}")
+    OPTIMIZER.process_srt_with_voice(args.input)
 
 def handle_generate_srt_from_folder(args):
-    print(f"🔄 正在生成SRT字幕文件：将基于TXT文本内容创建时间轴字幕[5](@ref)\n输入参数={args.input}")
+    print(f"🔄 正在生成SRT字幕文件：将基于TXT文本内容创建时间轴字幕\n输入参数={args.input}")
     try:
         # 处理文件夹路径
         if len(args.input) == 1 and os.path.isdir(args.input[0]):
@@ -91,19 +114,19 @@ def handle_generate_srt_from_folder(args):
         traceback.print_exc()
 
 def handle_correct_spelling(args):
-    print(f"🔍 启动AI拼写校正：使用{args.lang.upper()}语言模型检查字幕文件[7](@ref)\n输入={args.input} 输出={args.output or '覆盖原文件'}")
+    print(f"🔍 启动AI拼写校正：使用{args.lang.upper()}语言模型检查字幕文件\n输入={args.input} 输出={args.output or '覆盖原文件'}")
     OPTIMIZER.correct_spelling(args.input,args.output)
 
 def handle_merge_srt(args):
-    print(f"🧩 开始合并字幕文件：自动对齐时间轴并消除重叠片段[4](@ref)\n输入模式={args.input} 输出路径={args.output}")
+    print(f"🧩 开始合并字幕文件：自动对齐时间轴并消除重叠片段\n输入模式={args.input} 输出路径={args.output}")
     OPTIMIZER.merge_srt(args.input,args.output)
 
 def handle_split_lines(args):
-    print(f"✂️ 执行字幕行拆分：按每行最多{args.max_length}字符优化可读性[5](@ref)\n输入={args.input} 输出={args.output or '覆盖原文件'}")
+    print(f"✂️ 执行字幕行拆分：按每行最多{args.max_length}字符优化可读性\n输入={args.input} 输出={args.output or '覆盖原文件'}")
     OPTIMIZER.split_long_lines(args.input,args.output)
 
 def add_translation(args):
-    print(f"🌐 启动多语言翻译：通过DASHSCOPE API进行跨语言转换[9](@ref)\n输入={args.input} 输出={args.output}")
+    print(f"🌐 启动多语言翻译：通过DASHSCOPE API进行跨语言转换\n输入={args.input} 输出={args.output}")
     OPTIMIZER.add_translation(args.input,args.output)
 
 def extract_text_to_txt(args):

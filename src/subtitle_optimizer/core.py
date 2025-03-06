@@ -1,9 +1,12 @@
+import asyncio
 import json
 import os
 import re
 import time
 import traceback
+from types import SimpleNamespace
 from typing import List
+import edge_tts
 import numpy as np
 from pysrt import SubRipFile, SubRipItem
 import pysrt
@@ -13,7 +16,36 @@ import whisper
 from pydub import AudioSegment
 import torch
 from typing import Union, List, Tuple
+import time
+from functools import wraps
+from moviepy import VideoFileClip
 
+def retry_on_permission_error(max_retries=3, delay=0.5):
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            retries = 0
+            while retries < max_retries:
+                try:
+                    return func(*args, **kwargs)
+                except PermissionError as e:
+                    retries += 1
+                    if retries >= max_retries:
+                        raise
+                    print(f"Retry {retries}/{max_retries} due to {e}")
+                    time.sleep(delay)
+        return wrapper
+    return decorator
+
+# 在删除和重命名操作处添加装饰器
+@retry_on_permission_error()
+def safe_remove(filepath):
+    if os.path.exists(filepath):
+        os.remove(filepath)
+
+@retry_on_permission_error()
+def safe_rename(src, dst):
+    os.rename(src, dst)
 
 class SubtitleOptimizer:
     def __init__(self, api_key=None):
@@ -29,6 +61,221 @@ class SubtitleOptimizer:
         # self.whisper_model = whisper.load_model("large-v3")
         # 使用 "medium.en" 版本的 Whisper 模型，该模型专为英语设计，在精度和性能之间取得了较好的平衡。
         self.whisper_model = whisper.load_model("medium.en")
+
+    ###################视频变速######################
+    def adjust_video_speed(self, video_path: str, speed_factor: float = 0.9) -> None:
+        """
+        调整视频播放速率并覆盖原文件
+        
+        参数:
+            video_path (str): MP4视频文件路径
+            speed_factor (float): 速率倍数（默认0.9倍降速）
+        
+        示例:
+            obj = SubtitleOptimizer()
+            obj.adjust_video_speed("test.mp4", 0.5)  # 降速至0.5倍
+        """
+        if speed_factor==1:
+            print("视频速率已为正常速率，无需调整")
+            return
+        try:
+            video_path = os.path.abspath(video_path)
+            if os.path.exists(video_path) is False:
+                raise FileNotFoundError(f"未找到指定的视频文件：{video_path}")
+
+            # 加载视频
+            video = VideoFileClip(video_path)
+            adjusted_video =video.with_speed_scaled(speed_factor)
+            # 生成临时文件路径
+            temp_path = video_path.replace(".mp4", "_temp.mp4")
+            print(f"调整视频速率至 {speed_factor} 倍中... 保存到临时文件：{temp_path}")
+            
+            # 调整速率（moviepy会自动处理音频同步）
+            # adjusted_video = video.fx(video.speedx, speed_factor)
+            
+
+            # 写入临时文件（避免覆盖失败导致原文件损坏）
+            adjusted_video.write_videofile(
+                temp_path,
+                codec='libx264',
+                audio_codec='aac',
+                threads=4,
+                logger=None  # 关闭日志输出
+            )
+            
+            # 覆盖原文件
+            os.replace(temp_path, video_path)
+            print(f"视频速率已调整至 {speed_factor} 倍并覆盖原文件")
+
+        except Exception as e:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+            traceback.format_exc()
+            raise RuntimeError(f"视频变速处理失败: {str(e)}")
+            
+
+
+    ####################将srt转换为语音######################
+
+    def edge_tts_voice(self,args):
+        async def _text_to_speech():
+            # 获取参数内容
+            content = args.content
+            save_path = args.save_path
+            language = args.language
+            voice = args.voice
+            rate = getattr(args, 'rate', '+0%')  # 添加语速参数，默认为正常语速
+
+            # 检查内容是否为空
+            if not content:
+                raise ValueError("Content cannot be empty")
+
+            # 设置默认语言为英文
+            if language is None:
+                language = "en"
+
+            # 设置默认语音
+            if voice is None:
+                if language == "en":
+                    voice = "en-US-MichelleNeural"  # 默认英文
+                elif language == "en-child":
+                    voice = "en-US-AnaNeural"  # 默认儿童英文
+                elif language == "zh-cn":
+                    voice = "zh-CN-XiaoxiaoNeural"  # 默认中文
+                elif language == "zh-tw":
+                    voice = "zh-TW-HsiaoChenNeural"  # 默认台湾中文
+                else:
+                    raise ValueError(f"Unsupported language: {language}")
+                
+            communicate = edge_tts.Communicate(
+                content, 
+                voice, 
+                rate=rate
+            )
+            await communicate.save(save_path)
+            print(f"Audio saved successfully at {save_path}")
+
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(_text_to_speech())
+        finally:
+            loop.close()
+
+    def process_srt_with_voice(self, srt_path: str):
+        """处理SRT文件生成双语语音并调整时长"""
+        # 创建语音文件夹
+        srt_path = os.path.abspath(srt_path)
+        voice_dir = os.path.join(os.path.dirname(srt_path) , f"{os.path.basename(srt_path).split(".")[0]}-voice")
+        if not os.path.exists(voice_dir):
+            os.mkdir(voice_dir)
+        else:
+            raise FileExistsError(f"目标文件夹已存在：{voice_dir}")
+        
+        # 处理SRT文件
+        subs = pysrt.open(srt_path)
+        cn_audio_files = []
+        
+        for idx, sub in enumerate(subs, start=1):
+            # 分割字幕内容
+            lines = sub.text.split('\n')
+            
+            # 合并中英文字幕
+            merged = ['', '']
+            current_lang = 0  # 0-中文 1-英文
+            for line in lines:
+                has_chinese = bool(re.search(r'[\u4e00-\u9fff]', line))
+                target = 0 if has_chinese else 1
+                merged[target] += ' ' + line.strip()
+            
+            print(f"\n处理字幕：{idx} | 中文：{merged[0]} | 英文：{merged[1]}")
+
+            # 生成语音文件
+            for i, text in enumerate(merged):
+                if not text.strip():
+                    continue
+                
+                prefix = 'cn' if i == 0 else 'en'
+                filename = os.path.join(voice_dir , f"{prefix}-{idx:04d}.mp3") 
+                if prefix == 'cn':
+                    args = SimpleNamespace(
+                        content=text,
+                        save_path=str(filename),
+                        language='zh-cn',
+                        rate='+40%',
+                        voice=None
+                    )
+                else:
+                    args = SimpleNamespace(
+                        content=text,
+                        save_path=str(filename),
+                        language='en',
+                        rate='+0%',
+                        voice=None
+                    )
+                
+                # 调用语音生成（需处理异步）
+                self.edge_tts_voice(args)
+
+
+                if prefix == 'cn':
+                    cn_audio_files.append((filename, sub))
+        
+        # 调整中文语音时长（修复变速失效问题）
+        for filepath, sub in cn_audio_files:
+            audio = AudioSegment.from_file(filepath)
+            original_duration = len(audio) / 1000  # 转换为秒
+            
+            # 计算目标时长（毫秒转秒）
+            target_duration = (sub.end.ordinal - sub.start.ordinal) / 1000.0
+            
+            # 有效速度范围（基于语音清晰度研究）
+            min_speed = 0.7  # 最低语速（低于0.7x会导致严重失真）
+            max_speed = 2.0  # 最高语速（高于2.0x会丢失语音特征）
+            
+            if abs(original_duration - target_duration) > 0.1:  # 调整容差阈值至0.1秒
+                print(f"调整语音时长：{filepath} | 当前={original_duration:.2f}s | 目标={target_duration:.2f}s")
+                
+                # 修复1：使用正确的速度因子计算（当需要减速时取倒数）
+                speed_factor = original_duration / target_duration
+                
+                # 修复2：速度限制逻辑重构
+                if speed_factor > 1:  # 加速模式
+                    speed_factor = min(max_speed, speed_factor)
+                    processing_method = "加速"
+                else:  # 减速模式
+                    speed_factor = max(min_speed, 1/speed_factor)
+                    processing_method = "减速"
+                
+                print(f"速度系数：{speed_factor:.2f}x ({processing_method})")
+                
+                # 修复3：使用speedup方法并保持音高
+                adjusted_audio = audio.speedup(
+                    playback_speed=speed_factor,
+                    chunk_size=150,  # 减小块大小提升精度
+                    crossfade=25      # 添加交叉淡化
+                )
+                
+                # 新增：动态滤波处理（根据速度调整截止频率）
+                if speed_factor > 1.5:
+                    adjusted_audio = adjusted_audio.low_pass_filter(6000)  # 抑制高频噪声
+                elif speed_factor < 0.8:
+                    adjusted_audio = adjusted_audio.high_pass_filter(200)  # 增强低频
+                    
+                # 新增：振幅归一化防止削波
+                adjusted_audio = adjusted_audio.normalize()
+                
+                # 修复4：使用临时文件避免覆盖问题
+                temp_path = f"{filepath}.tmp"
+                adjusted_audio.export(temp_path, format="mp3", bitrate="192k")  # 固定比特率
+                
+                # 原子替换文件（Windows需处理文件占用问题）
+                if os.path.exists(filepath):
+                    safe_remove(filepath)
+                safe_rename(temp_path, filepath)
+            else:
+                print(f"跳过调整（差值{abs(original_duration - target_duration):.2f}s < 0.1s）：{filepath}")
+
 
     ####################通过txt生成SRT文件######################
     @staticmethod
@@ -183,23 +430,28 @@ class SubtitleOptimizer:
         """处理文件夹中的文件对"""
         mp4_files = [f for f in os.listdir(folder_path) if f.endswith(".mp4")]
         for mp4_file in mp4_files:
-            base_name = os.path.splitext(mp4_file)[0]
-            # 生成三种可能的相关文件路径
-            txt_path = os.path.join(folder_path, f"{base_name}.txt")
-            segments_path = os.path.join(folder_path, f"{base_name}_segments.txt")
-            mp4_path = os.path.join(folder_path, mp4_file)
-            
-            # 仅当txt文件存在时才处理
-            if os.path.exists(txt_path):
-                # 如果存在segments文件，则传递三元组
-                if os.path.exists(segments_path):
-                    self._generate_srt_from_txt_process_file_pair(txt_path, mp4_path, segments_path)
+            try:
+                base_name = os.path.splitext(mp4_file)[0]
+                # 生成三种可能的相关文件路径
+                txt_path = os.path.join(folder_path, f"{base_name}.txt")
+                segments_path = os.path.join(folder_path, f"{base_name}_segments.txt")
+                mp4_path = os.path.join(folder_path, mp4_file)
+                
+                # 仅当txt文件存在时才处理
+                if os.path.exists(txt_path):
+                    # 如果存在segments文件，则传递三元组
+                    if os.path.exists(segments_path):
+                        self._generate_srt_from_txt_process_file_pair(txt_path, mp4_path, segments_path)
+                    else:
+                        self._generate_srt_from_txt_process_file_pair(txt_path, mp4_path)
                 else:
-                    self._generate_srt_from_txt_process_file_pair(txt_path, mp4_path)
-            else:
-                raise FileNotFoundError(f"未找到对应的TXT文件：{txt_path}")
-            print(f"✅ 处理_generate_srt_from_txt_process_directory完成：{mp4_file}")
-
+                    raise FileNotFoundError(f"未找到对应的TXT文件：{txt_path}")
+                print(f"✅ 处理_generate_srt_from_txt_process_directory完成：{mp4_file}")
+            except Exception as e:
+                print(f"❌ 处理_generate_srt_from_txt_process_directory失败：{str(e)}")
+                traceback.print_exc()
+            print("\n")
+            
     def generate_srt_from_folder(self, path: Union[str, Tuple[str, str], Tuple[str, str, str]]):
         """
         入口方法，支持三种参数格式：
@@ -224,7 +476,7 @@ class SubtitleOptimizer:
 
     @staticmethod
     def _format_timestamp(seconds: float) -> str:
-        """将秒数转换为SRT时间格式[4](@ref)"""
+        """将秒数转换为SRT时间格式"""
         hours, remainder = divmod(seconds, 3600)
         minutes, seconds = divmod(remainder, 60)
         return f"{int(hours):02}:{int(minutes):02}:{seconds:06.3f}".replace(".", ",")
@@ -275,6 +527,7 @@ class SubtitleOptimizer:
             with open(txt_path, 'w', encoding='utf-8') as f:
                 f.write(extracted_text)
                 print(f"✅ 主文本已保存至：{txt_path}")
+                print(f"text:{extracted_text}\n")
 
             # 新增：写入分段文本文件
             if segments:
@@ -423,16 +676,15 @@ class SubtitleOptimizer:
         print(f"双语字幕已生成，保存路径：{save_path}")
 
     def _translate_subs(self, subs: SubRipFile, target_lang: str) -> SubRipFile:
-        """核心翻译逻辑（支持LLM API和Whisper双引擎）"""
         for sub in subs:
             src_text = sub.text.strip()
             
             # 语言检测与过滤（示例仅处理英文翻译）
             if detect_language(src_text) not in ['en']:
-                continue  # 跳过非英文内容[6](@ref)
+                continue  # 跳过非英文内容
             
             # 构造翻译指令（支持格式控制）
-            prompt = f"""将以下字幕精确翻译为{target_lang}，保持专业术语，禁止添加其他内容，专业术语可以直接保持英文原文。直接回复翻译后的结果，不要回答其他无关话语。
+            prompt = f"""将以下字幕精确翻译为{target_lang}，保持专业术语，禁止添加其他内容，专业术语可以直接保持英文原文，如果是疑问句可以适当添加语气助词。直接回复翻译后的结果，不要回答其他无关话语。
             {src_text}"""
             print(f"提问：{prompt}")
             # 调用翻译API（支持失败重试机制）
@@ -441,15 +693,18 @@ class SubtitleOptimizer:
                     prompt,
                     api_key=self.api_key,
                     model="qwen-max",
-                    temperature=0.2  # 降低随机性[8](@ref)
+                    temperature=0.2  # 降低随机性
                 )
                 
                 print(f"回答：{translated.strip()}\n")
                 # 清洗API返回结果
                 sub.text = f"{src_text}\n{translated.strip()}"
             except Exception as e:
-                print(f"翻译失败：{str(e)}，保留原文")
-        
+                print(f"翻译失败：{str(e)}，使用whisper翻译")
+                # 使用whisper翻译
+                translated = self.whisper_model.translate(src_text, target_lang=target_lang)
+                print(f"whisper回答：{translated.strip()}\n")
+                sub.text = f"{src_text}\n{translated.strip()}"
         return subs
 
     ####################修改字幕中的单词的错误拼写######################
@@ -473,7 +728,7 @@ class SubtitleOptimizer:
     def _correct_spelling(self, subs: SubRipFile) -> SubRipFile:
         for sub in subs:
             
-            # 生成拼写修正指令[6](@ref)
+            # 生成拼写修正指令
             prompt = f"""请修正以下字幕内容的单词拼写错误，回答修正后的字幕内容，不要返回其他任何无关的内容：
             {sub.text}"""
             print(f"问题：{prompt}")

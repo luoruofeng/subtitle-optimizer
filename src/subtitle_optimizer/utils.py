@@ -20,8 +20,8 @@ def call_llm_api(
     
     参数：
     :param prompt: 用户输入的提示文本
-    :param api_key: 阿里云API密钥（默认从环境变量DASHSCOPE_API_KEY读取）[4](@ref)
-    :param model: 模型名称，默认为deepseek-r1[8](@ref)
+    :param api_key: 阿里云API密钥（默认从环境变量DASHSCOPE_API_KEY读取）
+    :param model: 模型名称，默认为deepseek-r1
     :param system_prompt: 系统角色设定
     :param temperature: 生成多样性控制（0.1-1.0）
     :param max_tokens: 最大生成token数
