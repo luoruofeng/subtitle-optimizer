@@ -2,7 +2,6 @@ import asyncio
 import json
 import os
 import re
-import time
 import traceback
 from types import SimpleNamespace
 from typing import List
@@ -10,7 +9,7 @@ import edge_tts
 import numpy as np
 from pysrt import SubRipFile, SubRipItem
 import pysrt
-from subtitle_optimizer.utils import call_llm_api, detect_language, format_merged_text
+from subtitle_optimizer.utils import time_stretch_audio,call_llm_api, detect_language, format_merged_text
 from subtitle_optimizer.exceptions import LanguageMismatchError
 import whisper
 from pydub import AudioSegment
@@ -18,7 +17,7 @@ import torch
 from typing import Union, List, Tuple
 import time
 from functools import wraps
-from moviepy import VideoFileClip
+from moviepy import VideoFileClip,AudioFileClip
 
 def retry_on_permission_error(max_retries=3, delay=0.5):
     def decorator(func):
@@ -63,13 +62,13 @@ class SubtitleOptimizer:
         self.whisper_model = whisper.load_model("medium.en")
 
     ###################视频变速######################
-    def adjust_video_speed(self, video_path: str, speed_factor: float = 0.9) -> None:
+    def adjust_video_speed(self, video_path: str, speed_factor: float = 0.7) -> None:
         """
         调整视频播放速率并覆盖原文件
         
         参数:
             video_path (str): MP4视频文件路径
-            speed_factor (float): 速率倍数（默认0.9倍降速）
+            speed_factor (float): 速率倍数（默认0.7倍降速）
         
         示例:
             obj = SubtitleOptimizer()
@@ -80,38 +79,57 @@ class SubtitleOptimizer:
             return
         try:
             video_path = os.path.abspath(video_path)
+
+            voice_wav = time_stretch_audio(video_path, speed_factor)
+            audio = AudioFileClip(voice_wav)  # 新增代码
+
             if os.path.exists(video_path) is False:
                 raise FileNotFoundError(f"未找到指定的视频文件：{video_path}")
 
             # 加载视频
             video = VideoFileClip(video_path)
-            adjusted_video =video.with_speed_scaled(speed_factor)
             # 生成临时文件路径
             temp_path = video_path.replace(".mp4", "_temp.mp4")
             print(f"调整视频速率至 {speed_factor} 倍中... 保存到临时文件：{temp_path}")
             
-            # 调整速率（moviepy会自动处理音频同步）
-            # adjusted_video = video.fx(video.speedx, speed_factor)
+            # 视频处理
+            adjusted_video = video.with_speed_scaled(speed_factor).with_audio(audio)
+            temp_path = video_path.replace(".mp4", "_temp.mp4")
             
-
-            # 写入临时文件（避免覆盖失败导致原文件损坏）
+            # 写入临时文件（新增remove_temp参数）
             adjusted_video.write_videofile(
                 temp_path,
                 codec='libx264',
                 audio_codec='aac',
                 threads=4,
-                logger=None  # 关闭日志输出
+                logger=None,
+                remove_temp=True  # 强制清理临时文件
             )
             
-            # 覆盖原文件
-            os.replace(temp_path, video_path)
-            print(f"视频速率已调整至 {speed_factor} 倍并覆盖原文件")
+            # 显式释放资源（关键修复点）
+            for obj in [video, audio, adjusted_video]:
+                if obj: obj.close()
+            
+            # 覆盖原文件（新增重试机制）
+            retry_count = 0
+            while retry_count < 3:
+                try:
+                    os.replace(temp_path, video_path)
+                    break
+                except PermissionError:
+                    time.sleep(0.5)  # 等待500ms重试
+                    retry_count +=1
+            
+            print(f"覆盖完成: {video_path}")
 
         except Exception as e:
+            # 最终资源清理（新增）
+            for obj in [video, audio, adjusted_video]:
+                if obj and hasattr(obj, 'close'): obj.close()
             if os.path.exists(temp_path):
                 os.remove(temp_path)
-            traceback.format_exc()
-            raise RuntimeError(f"视频变速处理失败: {str(e)}")
+            if os.path.exists(voice_wav):
+                os.remove(voice_wav)
             
 
 
@@ -202,7 +220,7 @@ class SubtitleOptimizer:
                         content=text,
                         save_path=str(filename),
                         language='zh-cn',
-                        rate='+40%',
+                        rate='+33%',
                         voice=None
                     )
                 else:
@@ -259,7 +277,7 @@ class SubtitleOptimizer:
                 # 新增：动态滤波处理（根据速度调整截止频率）
                 if speed_factor > 1.5:
                     adjusted_audio = adjusted_audio.low_pass_filter(6000)  # 抑制高频噪声
-                elif speed_factor < 0.8:
+                elif speed_factor < 0.7:
                     adjusted_audio = adjusted_audio.high_pass_filter(200)  # 增强低频
                     
                 # 新增：振幅归一化防止削波

@@ -26,7 +26,7 @@ def main():
     # 添加子命令：adjust_video_speed
     adjust_video_speed_parser = subparsers.add_parser("adjust-video-speed", help="视频变速")
     adjust_video_speed_parser.add_argument("-i", "--input", required=True, help="输入mp4文件路径")
-    adjust_video_speed_parser.add_argument("-s", "--speed", required=False, default=0.9, type=float, help="速率（默认 0.9）")
+    adjust_video_speed_parser.add_argument("-s", "--speed", required=False, default=0.7, type=float, help="速率（默认 0.7）")
 
     
     # 添加子命令：merge_srt

@@ -1,10 +1,81 @@
 import re
 import os
 from typing import List, Dict, Optional
+import numpy as np
 from openai import OpenAI
 from openai.types.chat import ChatCompletion
 
-from subtitle_optimizer.exceptions import LanguageMismatchError
+import os
+import subprocess
+import tempfile
+import os
+import subprocess
+import tempfile
+import librosa
+import soundfile as sf
+
+def time_stretch_audio(mp4_path: str, rate: float, gain_factor: float = 1.5):
+    """
+    将MP4文件的音频流变速处理并保存为同名WAV文件
+    参数说明：
+    mp4_path : 输入MP4文件路径（如"/data/video.mp4"）
+    rate     : 变速比率（0.5-2.0），例如0.7表示减速到80%速度
+    """
+    # 验证输入参数有效性
+    if not os.path.isfile(mp4_path):
+        raise FileNotFoundError(f"输入文件不存在: {mp4_path}")
+    if not (0.5 <= rate <= 2.0):
+        raise ValueError("变速比率应在0.5到2.0之间")
+
+    # 生成输出路径（与原文件同目录同名，后缀改为.wav）
+    base_name = os.path.splitext(os.path.basename(mp4_path))[0]
+    output_path = os.path.join(
+        os.path.dirname(mp4_path),
+        f"{base_name}_stretched.wav"
+    )
+
+    # 创建临时文件保存提取的原始音频
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_file:
+        temp_audio_path = tmp_file.name
+
+    try:
+        # 使用FFmpeg提取音频流（网页7提到的MP4结构分离特性）
+        ffmpeg_cmd = [
+            "ffmpeg", "-y", "-i", mp4_path,
+            "-vn", "-acodec", "pcm_s16le",
+            "-ar", "44100",  # 统一采样率
+            "-ac", "2",      # 统一双声道
+            temp_audio_path
+        ]
+        subprocess.run(ffmpeg_cmd, check=True, capture_output=True)
+
+        # 加载音频并处理
+        y, sr = librosa.load(temp_audio_path, sr=None, mono=False)
+        y_stretched = librosa.effects.time_stretch(y, rate=rate)
+
+        # =========== 新增音量控制代码 ===========
+        # 应用线性增益（推荐1.0-3.0）
+        y_stretched *= gain_factor
+        # 防止削波（限制在[-1,1]范围）
+        y_stretched = np.clip(y_stretched, -1.0, 1.0)
+        # ======================================
+
+        # 保存处理后的音频
+        sf.write(output_path, y_stretched.T, sr, subtype='PCM_16')
+        
+        print(f"处理完成，保存至: {output_path}")
+        return output_path
+
+    except subprocess.CalledProcessError as e:
+        raise RuntimeError(f"音频提取失败: {e.stderr.decode()}") from e
+    except Exception as e:
+        raise RuntimeError(f"处理异常: {str(e)}") from e
+    finally:
+        # 清理临时文件
+        if os.path.exists(temp_audio_path):
+            os.remove(temp_audio_path)
+
+
 
 def call_llm_api(
     prompt: str,
