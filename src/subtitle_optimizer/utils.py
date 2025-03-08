@@ -13,7 +13,52 @@ import subprocess
 import tempfile
 import librosa
 import soundfile as sf
+import pysrt
+import os
+import chardet
 
+
+def detect_encoding(file_path):
+    with open(file_path, 'rb') as f:
+        raw_data = f.read()
+    result = chardet.detect(raw_data)
+    return result['encoding']
+
+def merge_short_subs(srt_path):
+    modified = True
+    while modified:
+        subs = pysrt.open(srt_path)
+        modified = False
+        
+        for i in range(len(subs)):
+            current = subs[i]
+            if len(current.text.split()) < 5:
+                prev = subs[i-1] if i > 0 else None
+                next_sub = subs[i+1] if i < len(subs)-1 else None
+
+                # 确定合并方向
+                if prev and (not next_sub or len(prev.text.split()) >= len(next_sub.text.split())):
+                    # 合并到上一行
+                    prev.end = current.end
+                    prev.text = f"{prev.text} {current.text}"
+                    del subs[i]
+                    modified = True
+                    break  # 退出当前循环重新遍历
+                elif next_sub:
+                    # 合并到下一行
+                    next_sub.start = current.start
+                    next_sub.text = f"{current.text} {next_sub.text}"
+                    del subs[i]
+                    modified = True
+                    break  # 退出当前循环重新遍历
+
+        if modified:
+            # 生成临时文件避免覆盖问题
+            temp_path = srt_path + ".tmp"
+            subs.save(temp_path, encoding='utf-8')
+            os.replace(temp_path, srt_path)
+
+            
 def time_stretch_audio(mp4_path: str, rate: float, gain_factor: float = 1.5):
     """
     将MP4文件的音频流变速处理并保存为同名WAV文件
@@ -103,14 +148,14 @@ def call_llm_api(
     示例：
     >>> response = call_llm_api("如何用Python实现快速排序？")
     """
-    # 自动获取API Key的优先级[4,6](@ref)
+    # 自动获取API Key的优先级
     final_api_key = api_key or os.getenv("DASHSCOPE_API_KEY")
     if not final_api_key:
         raise ValueError("未提供API Key且环境变量DASHSCOPE_API_KEY未设置")
 
     client = OpenAI(
         api_key=final_api_key,
-        base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",  # 固定接入点[8,11](@ref)
+        base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",  # 固定接入点
     )
 
     try:

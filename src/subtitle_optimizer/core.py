@@ -9,7 +9,7 @@ import edge_tts
 import numpy as np
 from pysrt import SubRipFile, SubRipItem
 import pysrt
-from subtitle_optimizer.utils import time_stretch_audio,call_llm_api, detect_language, format_merged_text
+from subtitle_optimizer.utils import detect_encoding,merge_short_subs,time_stretch_audio,call_llm_api, detect_language, format_merged_text
 from subtitle_optimizer.exceptions import LanguageMismatchError
 import whisper
 from pydub import AudioSegment
@@ -126,6 +126,8 @@ class SubtitleOptimizer:
             # 最终资源清理（新增）
             for obj in [video, audio, adjusted_video]:
                 if obj and hasattr(obj, 'close'): obj.close()
+        finally:
+            # 清理临时文件
             if os.path.exists(temp_path):
                 os.remove(temp_path)
             if os.path.exists(voice_wav):
@@ -180,7 +182,7 @@ class SubtitleOptimizer:
         finally:
             loop.close()
 
-    def process_srt_with_voice(self, srt_path: str):
+    def generate_voice_from_srt(self, srt_path: str):
         """处理SRT文件生成双语语音并调整时长"""
         # 创建语音文件夹
         srt_path = os.path.abspath(srt_path)
@@ -191,7 +193,7 @@ class SubtitleOptimizer:
             raise FileExistsError(f"目标文件夹已存在：{voice_dir}")
         
         # 处理SRT文件
-        subs = pysrt.open(srt_path)
+        subs = pysrt.open(srt_path, encoding='utf-8')
         cn_audio_files = []
         
         for idx, sub in enumerate(subs, start=1):
@@ -323,17 +325,14 @@ class SubtitleOptimizer:
         return merged
 
 
-    def _generate_srt_from_txt_process_file_pair(self, txt_path: str, mp4_path: str, segments_path: str = None):
+    def _generate_srt_from_segments(self, txt_path: str, mp4_path: str, segments_path: str = None):
         """处理单个文件对，支持可选的分段时间戳文件"""
-        # 读取文本内容（逻辑不变）
-        with open(txt_path, "r", encoding="utf-8") as f:
-            content = f.read()
-        sentences = SubtitleOptimizer._split_sentences(content)
-        print(f"✅ 提取到 {len(sentences)} 个句子")
-        print(f"\nsentences:{sentences}\n")
-
+        srt_path = os.path.splitext(mp4_path)[0] + ".srt"
+        if os.path.exists(srt_path):
+            print(f"SRT文件已存在：{srt_path} 跳过处理\n")
+            return
         # 时间戳来源判断
-        if segments_path and os.path.exists(segments_path):
+        if os.path.exists(segments_path):
             # 从文件加载预生成的时间戳
             try:
                 with open(segments_path, 'r', encoding='utf-8') as f:
@@ -348,18 +347,29 @@ class SubtitleOptimizer:
                 print(f"未知错误：{e}")
                 traceback.print_exc()
         else:
+            print(f"⏳ 正在提取 {mp4_path} 中的时间戳... segments_path 不存在:{segments_path}")
             # 通过Whisper生成时间戳
             result = self.whisper_model.transcribe(
                 mp4_path,
                 word_timestamps=True,
                 language="en",
                 task='transcribe',
-                fp16=torch.cuda.is_available(),
-                initial_prompt=" ".join(sentences)
+                fp16=torch.cuda.is_available()
             )
             segments = result["segments"]
         print(f"✅ 提取到 {len(segments)} 个时间戳段")
         
+        # 读取文本内容（逻辑不变）
+        content = ""
+        if txt_path is not None:
+            with open(txt_path, "r", encoding="utf-8") as f:
+                content = f.read()
+        elif segments is not None:
+            for segment in segments:
+                content+= segment.get("text", "")
+        sentences = SubtitleOptimizer._split_sentences(content) # 按照标点符号划分句子
+        print(f"✅ 提取到 {len(sentences)} 个句子")
+        print(f"句子：{sentences}\n")
         
         # 生成SRT内容
         all_words = [word for segment in segments for word in segment.get("words", [])]
@@ -372,7 +382,7 @@ class SubtitleOptimizer:
             sentence_words = normalized_sentence.split()
             
             matched = False
-            max_retry = 13  # 最大合并尝试次数[10](@ref)
+            max_retry = 13  # 最大合并尝试次数
             
             # 扩展匹配范围，考虑单词合并可能性
             for i in range(current_word_idx, min(len(all_words), current_word_idx + 200)):
@@ -439,12 +449,16 @@ class SubtitleOptimizer:
 
 
         # 保存SRT文件
-        srt_path = os.path.splitext(mp4_path)[0] + ".srt"
         with open(srt_path, "w", encoding="utf-8") as f:
             f.write("\n".join(srt_content))
-        print(f"✅ SRT文件已保存至：{srt_path}")
+            print(f"✅ SRT文件已保存至：{srt_path}")
+        
+        merge_short_subs(srt_path)  # 合并短句
+        print(f"合并后的srt文件：")
+        for line in open(srt_path, 'r', encoding='utf-8'):
+            print(line)
 
-    def _generate_srt_from_txt_process_directory(self, folder_path: str):
+    def generate_srt_from_directory(self, folder_path: str):
         """处理文件夹中的文件对"""
         mp4_files = [f for f in os.listdir(folder_path) if f.endswith(".mp4")]
         for mp4_file in mp4_files:
@@ -456,41 +470,16 @@ class SubtitleOptimizer:
                 mp4_path = os.path.join(folder_path, mp4_file)
                 
                 # 仅当txt文件存在时才处理
-                if os.path.exists(txt_path):
-                    # 如果存在segments文件，则传递三元组
-                    if os.path.exists(segments_path):
-                        self._generate_srt_from_txt_process_file_pair(txt_path, mp4_path, segments_path)
-                    else:
-                        self._generate_srt_from_txt_process_file_pair(txt_path, mp4_path)
-                else:
-                    raise FileNotFoundError(f"未找到对应的TXT文件：{txt_path}")
+                if not os.path.exists(txt_path):
+                    txt_path = None
+                    
+                self._generate_srt_from_segments(txt_path, mp4_path, segments_path)
                 print(f"✅ 处理_generate_srt_from_txt_process_directory完成：{mp4_file}")
             except Exception as e:
                 print(f"❌ 处理_generate_srt_from_txt_process_directory失败：{str(e)}")
                 traceback.print_exc()
             print("\n")
             
-    def generate_srt_from_folder(self, path: Union[str, Tuple[str, str], Tuple[str, str, str]]):
-        """
-        入口方法，支持三种参数格式：
-        1. 元组 (txt_path, mp4_path)
-        2. 元组 (txt_path, mp4_path, segments_path)
-        3. 文件夹路径
-        """
-        if isinstance(path, tuple):
-            if len(path) == 3:
-                self._generate_srt_from_txt_process_file_pair(*path)
-            else:
-                self._generate_srt_from_txt_process_file_pair(*path[:2])  # 兼容二元组
-        elif os.path.isdir(path):
-            try:
-                self._generate_srt_from_txt_process_directory(path)
-            except Exception as e:
-                print(f"❌ 处理文件夹_process_directory失败：{str(e)}")
-                traceback.print_exc()
-        else:
-            raise ValueError("无效的输入路径")
-        print(f"✅ SRT文件生成完成")
 
     @staticmethod
     def _format_timestamp(seconds: float) -> str:
@@ -501,19 +490,7 @@ class SubtitleOptimizer:
 
 
     ####################提取视频中的文本######################
-    def extract_text_to_txt(self, mp4_path: str) -> str:
-        """使用 Whisper 模型提取 MP4 文件中的英语文本，并保存为同名 TXT 文件
-        
-        参数:
-            mp4_path: 输入视频文件路径（支持绝对/相对路径）
-        
-        返回:
-            str: 提取的文本内容
-        
-        示例:
-            optimizer = SubtitleOptimizer()
-            text = optimizer.extract_text_to_txt("test_video.mp4")
-        """
+    def extract_segments_from_mp4(self, mp4_path: str) -> str:
         try:
             # 判断MP4文件是否存在
             if not os.path.exists(mp4_path):
@@ -687,7 +664,11 @@ class SubtitleOptimizer:
         """添加双语字幕并保存SRT文件
         :param target_lang: 目标语言代码（默认中文）
         """
-        subs = pysrt.open(input_srt_file, encoding='utf-8')
+        input_srt_file = os.path.abspath(input_srt_file)
+        # 判读后缀是否正确
+        if not input_srt_file.endswith('.srt'):
+            raise ValueError("输入文件必须为SRT格式")
+        subs = pysrt.open(input_srt_file, encoding=detect_encoding(input_srt_file))
         processed_subs = self._translate_subs(subs, target_lang)
         save_path = output_srt_file if output_srt_file else input_srt_file
         processed_subs.save(save_path, encoding='utf-8')
@@ -750,7 +731,7 @@ class SubtitleOptimizer:
             prompt = f"""请修正以下字幕内容的单词拼写错误，回答修正后的字幕内容，不要返回其他任何无关的内容：
             {sub.text}"""
             print(f"问题：{prompt}")
-            # 调用LLM API（支持多平台调用）[6,8](@ref)
+            # 调用LLM API（支持多平台调用）
             corrected = call_llm_api(
                 prompt, 
                 api_key=self.api_key,
@@ -766,7 +747,7 @@ class SubtitleOptimizer:
 
     def correct_and_save(self, srt_path: str, audio_path: str):
         """完整处理流程"""
-        subs = pysrt.open(srt_path)
+        subs = pysrt.open(srt_path, encoding='utf-8')
         corrected = self.correct_spelling(subs, audio_path)
         corrected.save(srt_path, encoding='utf-8')
         print(f"已完成拼写修正并覆盖保存：{srt_path}")
@@ -781,7 +762,7 @@ class SubtitleOptimizer:
         :param input_srt_file: 输入SRT文件路径
         :param output_srt_file: 输出SRT文件路径（空则覆盖原文件）
         """
-        subs = pysrt.open(input_srt_file)
+        subs = pysrt.open(input_srt_file, encoding='utf-8')
         mp4file = input_srt_file.replace('.srt', '.mp4')
         if not os.path.exists(mp4file):
             raise FileNotFoundError("未找到对应的视频文件"+mp4file)
