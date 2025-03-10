@@ -22,6 +22,12 @@ def main():
     correct_parser.add_argument("-o", "--output", help="输出文件路径（默认覆盖原文件）")
     correct_parser.add_argument("--lang", default="en", help="语言类型（默认：英文）")
 
+
+    # 添加子命令：add_voice_to_video_in_folder
+    add_voice_to_video_in_folder_parser = subparsers.add_parser("add-voice-to-video-in-folder", help="将文件夹中的音频融合进视频")
+    add_voice_to_video_in_folder_parser.add_argument("-i", "--input", required=True, help="输入文件夹路径")
+    add_voice_to_video_in_folder_parser.add_argument("-o", "--originvolume", type=int ,default=100,help="原视频的音量百分比")
+    add_voice_to_video_in_folder_parser.add_argument("-v", "--voicevolume", type=int ,default=100,help="添加音频的音量百分比")
     
     # 添加子命令：adjust_video_speed
     adjust_video_speed_parser = subparsers.add_parser("adjust-video-speed", help="视频变速")
@@ -89,6 +95,12 @@ def main():
         handle_generate_voice_from_srt(args)
     elif args.command == "adjust-video-speed":
         handle_adjust_video_speed(args)
+    elif args.command == "add-voice-to-video-in-folder":
+        handle_add_voice_to_video_in_folder(args)
+
+def handle_add_voice_to_video_in_folder(args):
+    print(f"🔊 添加音频到视频：将文件夹中的音频融合进视频\n输入={args.input} 原视频音量={args.originvolume} 添加音频音量={args.voicevolume}")
+    OPTIMIZER.add_voice_to_video_in_folder(args.input,args.originvolume,args.voicevolume)
 
 def handle_adjust_video_speed(args):
     print(f"🎥 视频变速处理：调整视频速率为{args.speed}\n输入={args.input}")

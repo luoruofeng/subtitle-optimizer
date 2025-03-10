@@ -14,37 +14,11 @@ from subtitle_optimizer.exceptions import LanguageMismatchError
 import whisper
 from pydub import AudioSegment
 import torch
-from typing import Union, List, Tuple
 import time
 from functools import wraps
-from moviepy import VideoFileClip,AudioFileClip
-
-def retry_on_permission_error(max_retries=3, delay=0.5):
-    def decorator(func):
-        @wraps(func)
-        def wrapper(*args, **kwargs):
-            retries = 0
-            while retries < max_retries:
-                try:
-                    return func(*args, **kwargs)
-                except PermissionError as e:
-                    retries += 1
-                    if retries >= max_retries:
-                        raise
-                    print(f"Retry {retries}/{max_retries} due to {e}")
-                    time.sleep(delay)
-        return wrapper
-    return decorator
-
-# 在删除和重命名操作处添加装饰器
-@retry_on_permission_error()
-def safe_remove(filepath):
-    if os.path.exists(filepath):
-        os.remove(filepath)
-
-@retry_on_permission_error()
-def safe_rename(src, dst):
-    os.rename(src, dst)
+from moviepy import VideoFileClip,AudioFileClip,CompositeAudioClip
+from pathlib import Path
+from moviepy.audio.AudioClip import AudioArrayClip
 
 class SubtitleOptimizer:
     def __init__(self, api_key=None):
@@ -61,6 +35,77 @@ class SubtitleOptimizer:
         # 使用 "medium.en" 版本的 Whisper 模型，该模型专为英语设计，在精度和性能之间取得了较好的平衡。
         self.whisper_model = whisper.load_model("medium.en")
 
+    ####################将mp3添加到MP4######################
+    def add_voice_to_video_in_folder(self, folder_path, mp4_volume_percent=100, mp3_volume_percent=100):
+        for video_file in Path(folder_path).glob("*.mp4"):
+            video_path = str(video_file)
+            base_name = video_file.stem
+            
+            srt_path = video_file.with_suffix(".srt")
+            voice_dir = video_file.parent / f"{base_name}-voice"
+            
+            if not (srt_path.exists() and voice_dir.exists()):
+                print(f"跳过 {base_name}: 缺少srt或voice文件夹")
+                continue
+
+            subs = pysrt.open(srt_path, encoding='utf-8')
+            subtitles = list(subs)
+            
+            voice_files = sorted(voice_dir.glob("cn-*.mp3"), 
+                            key=lambda x: int(re.search(r'cn-(\d+)', x.name).group(1)))
+            
+            if len(subtitles) != len(voice_files):
+                print(f"跳过 {base_name}: 字幕({len(subtitles)})与配音({len(voice_files)})数量不匹配")
+                continue
+
+            try:
+                video_clip = VideoFileClip(video_path)
+                if mp4_volume_percent != 100:
+                    original_audio = video_clip.audio.with_volume_scaled(factor=mp4_volume_percent / 100)
+                    # video_clip = video_clip.with_audio(original_audio)
+                else:
+                    original_audio = video_clip.audio
+
+                dubbed_audios = []
+                for sub, voice_file in zip(subtitles, voice_files):
+                    start_time = sub.start.ordinal / 1000
+                    voice = AudioSegment.from_mp3(voice_file)
+                    
+                    # 转换为AudioArrayClip  
+                    samples = np.array(voice.get_array_of_samples(), dtype=np.float32)
+                    samples = samples.reshape((-1, voice.channels))
+                    samples /= np.max(np.abs(samples))  # 归一化
+                    audio_clip = AudioArrayClip(samples, fps=voice.frame_rate)
+                    audio_clip = audio_clip.with_volume_scaled(factor=mp3_volume_percent / 100)
+                    
+                    dubbed_audios.append((start_time, audio_clip))
+                
+                # 合并音频
+                audio_clips = [original_audio] + [
+                    clip.with_start(start_time) for start_time, clip in dubbed_audios
+                ]
+                final_audio = CompositeAudioClip(audio_clips)
+                
+                final_clip = video_clip.with_audio(final_audio)
+                output_path = video_file.parent / f"{base_name}_mixed.mp4"
+                final_clip.write_videofile(
+                    str(output_path),
+                    codec="libx264",
+                    audio_codec="aac",
+                    temp_audiofile="temp-audio.m4a",
+                    remove_temp=True
+                )
+                
+                print(f"处理完成: {output_path}")
+                
+                # 清理资源
+                for _, clip in dubbed_audios:
+                    clip.close()
+                video_clip.close()
+            except Exception as e:
+                print(f"处理失败 {base_name}: {str(e)}")
+                traceback.print_exc()
+                
     ###################视频变速######################
     def adjust_video_speed(self, video_path: str, speed_factor: float = 0.7) -> None:
         """
@@ -222,7 +267,7 @@ class SubtitleOptimizer:
                         content=text,
                         save_path=str(filename),
                         language='zh-cn',
-                        rate='+33%',
+                        rate='+13%',
                         voice=None
                     )
                 else:
@@ -244,28 +289,28 @@ class SubtitleOptimizer:
         # 调整中文语音时长（修复变速失效问题）
         for filepath, sub in cn_audio_files:
             audio = AudioSegment.from_file(filepath)
-            original_duration = len(audio) / 1000  # 转换为秒
+            audio_original_duration = len(audio) / 1000  # 转换为秒
             
             # 计算目标时长（毫秒转秒）
-            target_duration = (sub.end.ordinal - sub.start.ordinal) / 1000.0
+            srt_target_duration = (sub.end.ordinal - sub.start.ordinal) / 1000.0
             
             # 有效速度范围（基于语音清晰度研究）
             min_speed = 0.7  # 最低语速（低于0.7x会导致严重失真）
             max_speed = 2.0  # 最高语速（高于2.0x会丢失语音特征）
             
-            if abs(original_duration - target_duration) > 0.1:  # 调整容差阈值至0.1秒
-                print(f"调整语音时长：{filepath} | 当前={original_duration:.2f}s | 目标={target_duration:.2f}s")
+            if audio_original_duration > srt_target_duration:
+                print(f"调整语音时长：{filepath} | 当前={audio_original_duration:.2f}s | 目标={srt_target_duration:.2f}s")
                 
                 # 修复1：使用正确的速度因子计算（当需要减速时取倒数）
-                speed_factor = original_duration / target_duration
+                speed_factor = audio_original_duration / srt_target_duration
                 
                 # 修复2：速度限制逻辑重构
                 if speed_factor > 1:  # 加速模式
                     speed_factor = min(max_speed, speed_factor)
                     processing_method = "加速"
-                else:  # 减速模式
-                    speed_factor = max(min_speed, 1/speed_factor)
-                    processing_method = "减速"
+                # else:  # 减速模式
+                #     speed_factor = max(min_speed, 1/speed_factor)
+                #     processing_method = "减速"
                 
                 print(f"速度系数：{speed_factor:.2f}x ({processing_method})")
                 
@@ -293,8 +338,13 @@ class SubtitleOptimizer:
                 if os.path.exists(filepath):
                     safe_remove(filepath)
                 safe_rename(temp_path, filepath)
+
+                #打印filepath处理完成后的时长（单位：秒）
+                audio = AudioSegment.from_file(filepath)
+                audio_original_duration = len(audio) / 1000  # 转换为秒
+                print(f"处理完成后的时长：{audio_original_duration:.2f}s")
             else:
-                print(f"跳过调整（差值{abs(original_duration - target_duration):.2f}s < 0.1s）：{filepath}")
+                print(f"跳过调整（差值{abs(audio_original_duration - srt_target_duration):.2f}s < 0.1s）：{filepath}")
 
 
     ####################通过txt生成SRT文件######################
@@ -946,3 +996,32 @@ class SubtitleOptimizer:
         # 截断至实际路径长度
         processed[-1] = len(alignment_path) - 1
         return sorted(list(set(processed)))[:num_splits+1]
+    
+
+
+def retry_on_permission_error(max_retries=3, delay=0.5):
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            retries = 0
+            while retries < max_retries:
+                try:
+                    return func(*args, **kwargs)
+                except PermissionError as e:
+                    retries += 1
+                    if retries >= max_retries:
+                        raise
+                    print(f"Retry {retries}/{max_retries} due to {e}")
+                    time.sleep(delay)
+        return wrapper
+    return decorator
+
+# 在删除和重命名操作处添加装饰器
+@retry_on_permission_error()
+def safe_remove(filepath):
+    if os.path.exists(filepath):
+        os.remove(filepath)
+
+@retry_on_permission_error()
+def safe_rename(src, dst):
+    os.rename(src, dst)
