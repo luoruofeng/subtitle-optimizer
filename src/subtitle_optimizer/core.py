@@ -35,8 +35,208 @@ class SubtitleOptimizer:
         # 使用 "medium.en" 版本的 Whisper 模型，该模型专为英语设计，在精度和性能之间取得了较好的平衡。
         self.whisper_model = whisper.load_model("medium.en")
 
+    ####################修改ass风格为单词下划线######################
+    def ass_to_single_word_style(self, folder_path: str) -> None:
+        """
+        处理ASS字幕文件，生成逐单词高亮版本
+        
+        参数:
+            folder_path (str): 包含ASS/MP4/分段文件的文件夹路径
+        """
+        folder = Path(folder_path)
+        translation_map = {}
+        if not folder.exists():
+            raise FileNotFoundError(f"路径不存在: {folder_path}")
+
+        for ass_path in folder.glob("*.ass"):
+            # 检查配套文件
+            base_name = ass_path.stem
+            mp4_path = ass_path.with_suffix(".mp4")
+            segments_path = ass_path.with_name(f"{base_name}_segments.txt")
+            
+            if not (mp4_path.exists() and segments_path.exists()):
+                print(f"跳过 {base_name}: 缺少MP4或分段文件")
+                continue
+
+            # 加载分段数据
+            try:
+                with open(segments_path, "r", encoding="utf-8") as f:
+                    segments = json.load(f)
+            except Exception as e:
+                print(f"加载分段文件失败: {segments_path} ({e})")
+                continue
+
+            # 解析ASS文件
+            try:
+                with open(ass_path, "r", encoding="utf-8") as f:
+                    ass_lines = [line.strip() for line in f]
+            except Exception as e:
+                print(f"读取ASS失败: {ass_path} ({e})")
+                continue
+
+            # 处理事件行
+            new_events = []
+            segment_idx = 0  # 分段数据索引
+            
+            for line in ass_lines:
+                if not line.startswith("Dialogue:"):
+                    continue
+                    
+                # 解析ASS行
+                print(f"处理ASS行: {line}")
+                parts = line.split(",", 9)
+                if len(parts) < 10:
+                    continue
+                    
+                start, end, style = parts[1:4]
+                cn_style="Chinese"
+                text = parts[9].strip(" \t\r\n")
+
+                # 中文行保留原样
+                if re.search(r'[\u4e00-\u9fff]', text):
+                    new_events.append(line)
+                    print(f" 跳过中文行: {text}")
+                    continue
+
+                # 获取对应分段
+                if segment_idx >= len(segments):
+                    print(f"分段数据不足，已处理 {segment_idx}/{len(segments)}")
+                    break
+                    
+                words = segments[segment_idx].get("words", [])
+                print(f" 处理分段: {words}")
+                segment_idx += 1
+
+                # 生成逐单词字幕
+                for word_info in words:
+                    word = word_info.get("word", "").strip()
+                    if not word:
+                        print(f" 跳过空单词")
+                        continue
+
+                    # 转换时间格式
+                    word_start = self._format_timestamp_ass(word_info["start"])
+                    word_end = self._format_timestamp_ass(word_info["end"])
+                    
+                    #调用call_llm_api获取单词的中文翻译
+                    if translation_map.get(word) is None:
+                        word_translation = call_llm_api(f"请将单词{word}翻译成中文,只回答翻译后的结果,不要回复任何与翻译无关的内容，不要冗余的重复问题")
+                        cn_word = word_translation.strip()
+                        translation_map[word] = cn_word
+                        print(f"大模型 单词：{word} 翻译结果: {cn_word}")
+                    else:
+                        cn_word = translation_map.get(word)
+                        print(f"缓存 单词：{word} 翻译结果: {cn_word}")
+
+                    # 添加样式信息
+                    styled_word = (
+                        r"{\an5\fad(10, 0)\fs34\c&HFF00FF&}"
+                        f"{word}"
+                        r"{\fs34\c&HFFFFFF&}"
+                    )
+
+                    # 构建新事件行
+                    new_line = (
+                        f"Dialogue: 0,{word_start},{word_end},"
+                        f"{style},,0,0,0,,{styled_word}"
+                    )
+                    print(f"生成新英文event: {new_line}")
+                    new_events.append(new_line)
+
+                    # 添加样式信息
+                    styled_cn_word = (
+                        r"{\an5\fs21\c&HFFFFFF&}"
+                        f"{cn_word}"
+                        r"{\fs21\c&HFFFFFF&}"
+                    )
+
+                    # 构建新事件行
+                    new_line = (
+                        f"Dialogue: 0,{word_start},{word_end},"
+                        f"{cn_style},,0,0,0,,{styled_cn_word}"
+                    )
+                    print(f"生成新中文event: {new_line}")
+                    new_events.append(new_line)
+
+            # 生成新ASS内容
+            output_path = ass_path.with_name(f"{base_name}_single_word.ass")
+            with open(output_path, "w", encoding="utf-8") as f:
+                # 保留原文件头
+                header_end = ass_lines.index("[Events]") if "[Events]" in ass_lines else -1
+                if header_end != -1:
+                    f.write("\n".join(ass_lines[:header_end+1]))
+                
+                # 写入新事件
+                f.write("\n".join(new_events))
+                
+            print(f"生成逐单词字幕: {output_path}")
+
+    def _format_timestamp_ass(self, seconds: float) -> str:
+        """将秒数转换为ASS时间格式 (H:MM:SS.cc)"""
+        total_centiseconds = int(round(seconds * 100))
+        hours, remaining = divmod(total_centiseconds, 360000)
+        minutes, remaining = divmod(remaining, 6000)
+        seconds, centiseconds = divmod(remaining, 100)
+        return f"{hours}:{minutes:02}:{seconds:02}.{centiseconds:02}"
+
+
+    ####################将srt转换为ass######################
+    ASS_STYLE = """
+[Script Info]
+Title: Converted SRT to ASS
+Original Script: Python Script
+ScriptType: v4.00+
+Collisions: Normal
+PlayDepth: 0
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, Spacing, Outline
+# 定义一个默认样式，包含所有相同的值
+Style: Default,,0,&H00000000,&H00000000,&HFF000000,1,0,0,0,100,100,0,0,3,0,6,2,0,0,0,1
+# 定义具体样式，只覆盖不同的值
+Style: Chinese,AlibabaPuHuiTi-3-115-Black,12,&H0005CDF7,0,2
+Style: English,Alibaba Sans Black,14,&H0005CDF7,-2,3
+Style: Chinese_yellow,AlibabaPuHuiTi-3-115-Black,12,&H00FFFF00,0,2
+Style: English_yellow,Alibaba Sans Black,16,&H00FFFF00,-2,3
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+"""
+    def convert_srt_to_ass(self, srt_path: str) -> None:
+        ass_path = os.path.splitext(srt_path)[0] + ".ass"
+        
+        if os.path.exists(ass_path):
+            print(f"ASS文件已存在: {ass_path}")
+            return
+
+        try:
+            subs = pysrt.open(srt_path, encoding='utf-8')
+            ass_content = [self.ASS_STYLE.strip()]
+
+            for sub in subs:
+                # 转换时间戳格式（核心修改点）
+                start_time = f"{sub.start.hours}:{sub.start.minutes:02}:{sub.start.seconds:02}.{sub.start.milliseconds // 10:02}"
+                end_time = f"{sub.end.hours}:{sub.end.minutes:02}:{sub.end.seconds:02}.{sub.end.milliseconds // 10:02}"
+                
+                lines = sub.text.split("\n")
+                
+                for line in lines:
+                    style = "Chinese" if re.search(r'[\u4e00-\u9fff]', line) else "English"
+                    dialogue = f"Dialogue: 0,{start_time},{end_time},{style},,0,0,0,,{line}"
+                    ass_content.append(dialogue)
+
+            with open(ass_path, "w", encoding="utf-8") as f:
+                f.write("\n".join(ass_content))
+                
+            print(f"转换完成: {ass_path}")
+
+        except Exception as e:
+            print(f"转换失败: {str(e)}")
+            traceback.print_exc()
+
     ####################将mp3添加到MP4######################
     def add_voice_to_video_in_folder(self, folder_path, mp4_volume_percent=100, mp3_volume_percent=100):
+        folder_path = os.path.abspath(folder_path)
         for video_file in Path(folder_path).glob("*.mp4"):
             video_path = str(video_file)
             base_name = video_file.stem
@@ -62,7 +262,7 @@ class SubtitleOptimizer:
                 video_clip = VideoFileClip(video_path)
                 if mp4_volume_percent != 100:
                     original_audio = video_clip.audio.with_volume_scaled(factor=mp4_volume_percent / 100)
-                    # video_clip = video_clip.with_audio(original_audio)
+                    # video_clip = video_clip.with_audio(original_audio) #这个方法可以将覆盖原MP4的音频 这里不需要保存
                 else:
                     original_audio = video_clip.audio
 
@@ -125,8 +325,13 @@ class SubtitleOptimizer:
         try:
             video_path = os.path.abspath(video_path)
 
-            voice_wav = time_stretch_audio(video_path, speed_factor)
-            audio = AudioFileClip(voice_wav)  # 新增代码
+            if speed_factor == 1:
+                # 提取video_path的AudioFileClip
+                audio = AudioFileClip(video_path)
+            else:
+                # 提取video_path的音频并变速
+                voice_wav = time_stretch_audio(video_path, speed_factor)
+                audio = AudioFileClip(voice_wav)  # 新增代码
 
             if os.path.exists(video_path) is False:
                 raise FileNotFoundError(f"未找到指定的视频文件：{video_path}")
@@ -407,6 +612,12 @@ class SubtitleOptimizer:
                 fp16=torch.cuda.is_available()
             )
             segments = result["segments"]
+
+            print(f"✅ 将时间戳已提取，保存至：{segments_path}")
+            with open(segments_path, 'w', encoding='utf-8') as seg_file:
+                # 使用json.dump()将列表序列化为JSON格式写入文件
+                json.dump(segments, seg_file, ensure_ascii=False, indent=4)
+            print(f"✅ 分段数据已JSON序列化保存至：{segments_path}")
         print(f"✅ 提取到 {len(segments)} 个时间戳段")
         
         # 读取文本内容（逻辑不变）

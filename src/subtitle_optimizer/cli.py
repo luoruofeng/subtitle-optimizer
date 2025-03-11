@@ -22,6 +22,13 @@ def main():
     correct_parser.add_argument("-o", "--output", help="输出文件路径（默认覆盖原文件）")
     correct_parser.add_argument("--lang", default="en", help="语言类型（默认：英文）")
 
+    # 添加子命令：ass_to_single_word_style
+    ass_to_single_word_style_parser = subparsers.add_parser("ass-to-single-word-style-in-folder", help="将ASS字幕转换为单Word样式")
+    ass_to_single_word_style_parser.add_argument("-i", "--input", required=True, help="输入ASS字幕文件路径")
+
+    # 添加子命令：convert_srt_to_ass
+    convert_srt_to_ass_parser = subparsers.add_parser("convert-srt-to-ass", help="srt字幕转ass字幕")
+    convert_srt_to_ass_parser.add_argument("-i", "--input", required=True, help="输入字幕文件路径")
 
     # 添加子命令：add_voice_to_video_in_folder
     add_voice_to_video_in_folder_parser = subparsers.add_parser("add-voice-to-video-in-folder", help="将文件夹中的音频融合进视频")
@@ -97,6 +104,19 @@ def main():
         handle_adjust_video_speed(args)
     elif args.command == "add-voice-to-video-in-folder":
         handle_add_voice_to_video_in_folder(args)
+    elif args.command == "convert-srt-to-ass":
+        handle_convert_srt_to_ass(args)
+    elif args.command == "ass-to-single-word-style-in-folder":
+        handle_ass_to_single_word_style(args)
+
+
+def handle_ass_to_single_word_style(args):
+    print(f"📝 字幕样式转换：将ASS字幕转换为Word样式\n输入={args.input}")
+    OPTIMIZER.ass_to_single_word_style(args.input)
+
+def handle_convert_srt_to_ass(args):
+    print(f"🎬 字幕转换：将SRT字幕转换为ASS字幕\n输入={args.input}")
+    OPTIMIZER.convert_srt_to_ass(args.input)
 
 def handle_add_voice_to_video_in_folder(args):
     print(f"🔊 添加音频到视频：将文件夹中的音频融合进视频\n输入={args.input} 原视频音量={args.originvolume} 添加音频音量={args.voicevolume}")

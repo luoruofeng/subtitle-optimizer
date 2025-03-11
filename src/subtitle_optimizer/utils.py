@@ -5,18 +5,50 @@ import numpy as np
 from openai import OpenAI
 from openai.types.chat import ChatCompletion
 
-import os
 import subprocess
 import tempfile
-import os
 import subprocess
 import tempfile
 import librosa
 import soundfile as sf
 import pysrt
-import os
 import chardet
+import traceback
+from moviepy import VideoFileClip
+import os
 
+
+def extract_audio_from_mp4(mp4_file_path):
+    try:
+        # 检查文件是否存在
+        if not os.path.exists(mp4_file_path):
+            print(f"指定的文件 {mp4_file_path} 不存在。")
+            return
+
+        # 加载视频文件
+        video_clip = VideoFileClip(mp4_file_path)
+
+        # 获取视频文件所在目录和文件名
+        file_dir = os.path.dirname(mp4_file_path)
+        file_name = os.path.splitext(os.path.basename(mp4_file_path))[0]
+
+        # 生成对应的 MP3 文件路径
+        mp3_file_path = os.path.join(file_dir, f"{file_name}.mp3")
+
+        # 提取音频
+        audio_clip = video_clip.audio
+
+        # 保存音频为 MP3 文件
+        audio_clip.write_audiofile(mp3_file_path)
+
+        # 关闭剪辑资源
+        video_clip.close()
+        audio_clip.close()
+
+        print(f"音频已成功提取并保存到 {mp3_file_path}")
+    except Exception as e:
+        print(f"提取音频时出现错误: {e}")
+        traceback.print_exc()
 
 def detect_encoding(file_path):
     with open(file_path, 'rb') as f:
