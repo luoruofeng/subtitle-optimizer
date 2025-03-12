@@ -1,4 +1,5 @@
 import asyncio
+import sqlite3
 import json
 import os
 import re
@@ -34,6 +35,64 @@ class SubtitleOptimizer:
         # self.whisper_model = whisper.load_model("large-v3")
         # 使用 "medium.en" 版本的 Whisper 模型，该模型专为英语设计，在精度和性能之间取得了较好的平衡。
         self.whisper_model = whisper.load_model("medium.en")
+        # 初始化数据库连接（建议在类初始化时创建）
+        self.db_path = Path("translations.db")
+        self._init_db()
+
+    def _init_db(self):
+        """初始化SQLite数据库和表结构[1,3](@ref)"""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute('''CREATE TABLE IF NOT EXISTS translations (
+                            word TEXT PRIMARY KEY,
+                            translation TEXT NOT NULL
+                         )''')
+            conn.commit()
+
+    def _get_translation(self, word: str) -> str:
+        """从数据库获取或生成翻译[5,11](@ref)"""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            
+            # 查询现有翻译
+            cursor.execute("SELECT translation FROM translations WHERE word=?", (word,))
+            result = cursor.fetchone()
+            
+            if result:
+                return result[0]
+            
+            # 调用API获取新翻译
+            word_translation = call_llm_api(f"请将单词{word}翻译成中文...")
+            cn_word = word_translation.strip()
+            
+            try:
+                # 插入新记录[1](@ref)
+                cursor.execute("INSERT INTO translations VALUES (?, ?)", (word, cn_word))
+                conn.commit()
+            except sqlite3.IntegrityError:
+                # 处理并发写入冲突
+                cursor.execute("SELECT translation FROM translations WHERE word=?", (word,))
+                return cursor.fetchone()[0]
+                
+            return cn_word
+    
+    def _save_translation(self, word: str, translation: str) -> None:
+        """保存或更新翻译记录"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                # 使用 UPSERT 语法处理重复键[1](@ref)
+                cursor.execute('''
+                    INSERT INTO translations (word, translation)
+                    VALUES (?, ?)
+                    ON CONFLICT(word) DO UPDATE SET
+                        translation = excluded.translation,
+                        created_at = CURRENT_TIMESTAMP
+                ''', (word, translation))
+                conn.commit()
+        except sqlite3.Error as e:
+            print(f"数据库保存失败: {e}")
+            raise
 
     ####################修改ass风格为单词下划线######################
     def ass_to_single_word_style(self, folder_path: str) -> None:
@@ -44,7 +103,6 @@ class SubtitleOptimizer:
             folder_path (str): 包含ASS/MP4/分段文件的文件夹路径
         """
         folder = Path(folder_path)
-        translation_map = {}
         if not folder.exists():
             raise FileNotFoundError(f"路径不存在: {folder_path}")
 
@@ -109,30 +167,41 @@ class SubtitleOptimizer:
 
                 # 生成逐单词字幕
                 for word_info in words:
-                    word = word_info.get("word", "").strip()
+                    word = word_info.get("word")
                     if not word:
-                        print(f" 跳过空单词")
                         continue
-
+                    word = word.strip().lower()
+                    # 去除word前后的所有标点符号
+                    word = re.sub(r'^\W+|\W+$', '', word)
+                    #判断word是否包含a-z字母
+                    if not re.search(r'[a-z]', word):
+                        cn_word = word
+                    else:
+                        try:
+                            cn_word = self._get_translation(word)
+                            print(f"数据库 单词：{word} 翻译结果: {cn_word}")
+                        except sqlite3.Error as e:
+                            print(f"查询翻译 数据库操作失败: {e}")
+                            traceback.print_exc()
+                        
+                        #调用call_llm_api获取单词的中文翻译
+                        if cn_word is None:
+                            word_translation = call_llm_api(f"请将单词{word}翻译成简洁的中文含义,只回答翻译后的结果(如果有多个结果返最常用的2个结果并且用分号隔开),不要解释翻译的任何说明，不要回复任何与翻译无关的内容，不要冗余的重复问题")
+                            cn_word = word_translation.strip()
+                            self._save_translation(word, cn_word)
+                            print(f"大模型 单词：{word} 翻译结果: {cn_word}")
+                    
                     # 转换时间格式
                     word_start = self._format_timestamp_ass(word_info["start"])
                     word_end = self._format_timestamp_ass(word_info["end"])
                     
-                    #调用call_llm_api获取单词的中文翻译
-                    if translation_map.get(word) is None:
-                        word_translation = call_llm_api(f"请将单词{word}翻译成中文,只回答翻译后的结果,不要回复任何与翻译无关的内容，不要冗余的重复问题")
-                        cn_word = word_translation.strip()
-                        translation_map[word] = cn_word
-                        print(f"大模型 单词：{word} 翻译结果: {cn_word}")
-                    else:
-                        cn_word = translation_map.get(word)
-                        print(f"缓存 单词：{word} 翻译结果: {cn_word}")
 
                     # 添加样式信息
                     styled_word = (
-                        r"{\an5\fad(10, 0)\fs34\c&HFF00FF&}"
+                        r"{\an5\fad(8,0)\t(60,10,\fscx120\fscy120)}"  # 横向+纵向同步放大
+                        r"{\fs34\c&HFF00FF&}"                        # 合理基础字号（如24）
                         f"{word}"
-                        r"{\fs34\c&HFFFFFF&}"
+                        r"{\c&HFFFFFF&}"
                     )
 
                     # 构建新事件行
@@ -153,7 +222,7 @@ class SubtitleOptimizer:
                     # 构建新事件行
                     new_line = (
                         f"Dialogue: 0,{word_start},{word_end},"
-                        f"{cn_style},,0,0,0,,{styled_cn_word}"
+                        f"{cn_style},,0,0,60,,{styled_cn_word}"
                     )
                     print(f"生成新中文event: {new_line}")
                     new_events.append(new_line)
@@ -181,7 +250,16 @@ class SubtitleOptimizer:
 
 
     ####################将srt转换为ass######################
-    ASS_STYLE = """
+    def convert_srt_to_ass(self, srt_path: str, 
+        alignment: int = 6,  # 默认上方居中[3](@ref)
+        marginV: int = 0, 
+        cn_fontsize: int = 12,
+        en_fontsize: int = 14,
+        cn_PrimaryColour: str = "&H0005CDF7",
+        en_PrimaryColour: str = "&H0005CDF7",
+        en_outline:int = 6,
+        cn_outline:int = 3) -> None:
+        ass_style = f"""
 [Script Info]
 Title: Converted SRT to ASS
 Original Script: Python Script
@@ -190,19 +268,14 @@ Collisions: Normal
 PlayDepth: 0
 
 [V4+ Styles]
-Format: Name, Fontname, Fontsize, PrimaryColour, Spacing, Outline
-# 定义一个默认样式，包含所有相同的值
-Style: Default,,0,&H00000000,&H00000000,&HFF000000,1,0,0,0,100,100,0,0,3,0,6,2,0,0,0,1
-# 定义具体样式，只覆盖不同的值
-Style: Chinese,AlibabaPuHuiTi-3-115-Black,12,&H0005CDF7,0,2
-Style: English,Alibaba Sans Black,14,&H0005CDF7,-2,3
-Style: Chinese_yellow,AlibabaPuHuiTi-3-115-Black,12,&H00FFFF00,0,2
-Style: English_yellow,Alibaba Sans Black,16,&H00FFFF00,-2,3
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Default,Arial,12,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,1,0,{alignment},0,0,{marginV},1
+Style: Chinese,AlibabaPuHuiTi-3-115-Black,{cn_fontsize},{cn_PrimaryColour},&H000000FF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,{cn_outline},0,{alignment},0,0,{marginV},1
+Style: English,Alibaba Sans Black,{en_fontsize},{en_PrimaryColour},&H000000FF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,{en_outline},0,{alignment},0,0,{marginV},1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
-    def convert_srt_to_ass(self, srt_path: str) -> None:
         ass_path = os.path.splitext(srt_path)[0] + ".ass"
         
         if os.path.exists(ass_path):
@@ -211,7 +284,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
         try:
             subs = pysrt.open(srt_path, encoding='utf-8')
-            ass_content = [self.ASS_STYLE.strip()]
+            ass_content = [ass_style.strip()]
 
             for sub in subs:
                 # 转换时间戳格式（核心修改点）
