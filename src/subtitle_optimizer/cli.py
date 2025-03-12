@@ -26,6 +26,11 @@ def main():
     ass_to_single_word_style_parser = subparsers.add_parser("ass-to-single-word-style-in-folder", help="将ASS字幕转换为单Word样式")
     ass_to_single_word_style_parser.add_argument("-i", "--input", required=True, help="输入ASS字幕文件路径")
 
+    # 添加子命令：ass_to_sentence_style
+    ass_to_sentence_style_parser = subparsers.add_parser("ass-to-sentence-style-in-folder", help="将ASS字幕转换为动态句子样式")
+    ass_to_sentence_style_parser.add_argument("-i", "--input", required=True, help="输入ASS字幕文件路径")
+
+
     # 添加子命令：convert_srt_to_ass
     convert_srt_to_ass_parser = subparsers.add_parser("convert-srt-to-ass", help="srt字幕转ass字幕")
     convert_srt_to_ass_parser.add_argument("-i", "--input", required=True, help="输入字幕文件路径")
@@ -108,6 +113,12 @@ def main():
         handle_convert_srt_to_ass(args)
     elif args.command == "ass-to-single-word-style-in-folder":
         handle_ass_to_single_word_style(args)
+    elif args.command == "ass-to-sentence-style-in-folder":
+        handle_ass_to_sentence_style(args)
+
+def handle_ass_to_sentence_style(args):
+    print(f"📝 字幕样式转换：将ASS字幕转换为动态句子样式\n输入={args.input}")
+    OPTIMIZER.ass_to_sentence_style(args.input)
 
 
 def handle_ass_to_single_word_style(args):

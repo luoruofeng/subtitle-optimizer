@@ -10,7 +10,7 @@ import edge_tts
 import numpy as np
 from pysrt import SubRipFile, SubRipItem
 import pysrt
-from subtitle_optimizer.utils import detect_encoding,merge_short_subs,time_stretch_audio,call_llm_api, detect_language, format_merged_text
+from subtitle_optimizer.utils import *
 from subtitle_optimizer.exceptions import LanguageMismatchError
 import whisper
 from pydub import AudioSegment
@@ -39,62 +39,189 @@ class SubtitleOptimizer:
         self.db_path = Path("translations.db")
         self._init_db()
 
-    def _init_db(self):
-        """初始化SQLite数据库和表结构[1,3](@ref)"""
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            cursor.execute('''CREATE TABLE IF NOT EXISTS translations (
-                            word TEXT PRIMARY KEY,
-                            translation TEXT NOT NULL
-                         )''')
-            conn.commit()
+        ####################修改ass风格为单词渐变显示######################
+    def ass_to_sentence_style(self, folder_path: str) -> None:
+        """
+        处理ASS字幕文件，生成逐单词高亮版本
+        
+        参数:
+            folder_path (str): 包含ASS/MP4/分段文件的文件夹路径
+        """
+        folder = Path(folder_path)
+        if not folder.exists():
+            raise FileNotFoundError(f"路径不存在: {folder_path}")
 
-    def _get_translation(self, word: str) -> str:
-        """从数据库获取或生成翻译[5,11](@ref)"""
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
+        for ass_path in folder.glob("*.ass"):
+            # 检查配套文件
+            base_name = ass_path.stem
+            mp4_path = ass_path.with_suffix(".mp4")
+            segments_path = ass_path.with_name(f"{base_name}_segments.txt")
             
-            # 查询现有翻译
-            cursor.execute("SELECT translation FROM translations WHERE word=?", (word,))
-            result = cursor.fetchone()
-            
-            if result:
-                return result[0]
-            
-            # 调用API获取新翻译
-            word_translation = call_llm_api(f"请将单词{word}翻译成中文...")
-            cn_word = word_translation.strip()
-            
+            if not (mp4_path.exists() and segments_path.exists()):
+                print(f"跳过 {base_name}: 缺少MP4或分段文件")
+                continue
+
+            # 加载分段数据
             try:
-                # 插入新记录[1](@ref)
-                cursor.execute("INSERT INTO translations VALUES (?, ?)", (word, cn_word))
-                conn.commit()
-            except sqlite3.IntegrityError:
-                # 处理并发写入冲突
-                cursor.execute("SELECT translation FROM translations WHERE word=?", (word,))
-                return cursor.fetchone()[0]
-                
-            return cn_word
-    
-    def _save_translation(self, word: str, translation: str) -> None:
-        """保存或更新翻译记录"""
-        try:
-            with sqlite3.connect(self.db_path) as conn:
-                cursor = conn.cursor()
-                # 使用 UPSERT 语法处理重复键[1](@ref)
-                cursor.execute('''
-                    INSERT INTO translations (word, translation)
-                    VALUES (?, ?)
-                    ON CONFLICT(word) DO UPDATE SET
-                        translation = excluded.translation,
-                        created_at = CURRENT_TIMESTAMP
-                ''', (word, translation))
-                conn.commit()
-        except sqlite3.Error as e:
-            print(f"数据库保存失败: {e}")
-            raise
+                with open(segments_path, "r", encoding="utf-8") as f:
+                    segments = json.load(f)
+            except Exception as e:
+                print(f"加载分段文件失败: {segments_path} ({e})")
+                continue
 
-    ####################修改ass风格为单词下划线######################
+            # 解析ASS文件
+            try:
+                with open(ass_path, "r", encoding="utf-8") as f:
+                    ass_lines = [line.strip() for line in f]
+            except Exception as e:
+                print(f"读取ASS失败: {ass_path} ({e})")
+                continue
+
+            # 处理事件行
+            new_events = []
+            #将segments中的所有的words组合成all_words
+            all_words = [word for segment in segments for word in segment.get("words", [])]
+            current_word_index = 0
+            
+            for line in ass_lines:
+                if not line.startswith("Dialogue:"):
+                    continue
+                    
+                # 解析ASS行
+                print(f"处理ASS行: {line}")
+                parts = line.split(",", 9)
+                if len(parts) < 10:
+                    continue
+                    
+                start, end, style = parts[1:4]
+                cn_style="Chinese"
+                text = parts[9].strip(" \t\r\n")
+
+                # 中文行保留原样
+                if re.search(r'[\u4e00-\u9fff]', text):
+                    new_events.append(line)
+                    print(f" 跳过中文行: {text}")
+                    continue
+
+                #从line获取内容
+                sentence = line.split(",", 9)[9].strip(" \t\r\n")
+                sentence_word_list = sentence.split(" ")
+                print(f" 处理句子: {sentence}")
+
+                # 重置临时变量
+                temp_clip_str = ""
+                temp_clip_start_time = None
+                temp_clip_end_time = None
+                before_word_end_time = None
+                # 生成逐单词字幕
+                for index_in_segments_text,sw in enumerate(sentence_word_list):
+                    word_info = all_words[current_word_index]
+                    word = word_info.get("word")
+                    if not word:
+                        continue
+                    if sw.strip() != word.strip():
+                        print(f"单词{sw}与分段中的单词{word}不匹配")
+                        if word.strip() not in sw.strip():
+                            raise ValueError(f"单词{sw}与分段中的单词{word}不匹配")
+                        else:
+                            max_retry_counter = 0
+                            while True:
+                                if word.strip() not in sw.strip():
+                                    raise ValueError(f"单词{sw}与分段中的单词{word}不匹配")
+                                if max_retry_counter > 10:
+                                    raise ValueError(f"重试次数超过10次数 temp_cli_str:{temp_clip_str} 单词{sw}与分段中的单词{word}不匹配")
+                                temp_clip_str += word.strip()
+                                if temp_clip_start_time is None:
+                                    temp_clip_start_time = word_info["start"]
+                                    print(f" 生成拼接单词: {temp_clip_str} 开始时间: {temp_clip_start_time}")
+                                temp_clip_end_time = word_info["end"]
+                                print(f" 生成拼接单词: {temp_clip_str} 结束时间: {temp_clip_end_time}")
+                                if temp_clip_str != sw.strip():
+                                    current_word_index+=1
+                                    max_retry_counter+=1
+                                    word_info = all_words[current_word_index]
+                                    word = word_info.get("word")
+                                    print(f"单词{sw}与分段中的单词{word}不匹配")
+                                    continue   
+                                else:
+                                    word = temp_clip_str
+                                    print(f" 生成拼接单词: {temp_clip_str}")
+                                    break
+                    else:
+                        pass
+                    current_word_index+=1
+
+                    # 转换时间格式
+                    if temp_clip_start_time is not None and temp_clip_end_time is not None:
+                        word_start = format_timestamp_ass(temp_clip_start_time)
+                        word_end = format_timestamp_ass(temp_clip_end_time)
+                        if before_word_end_time is not None and word_start != before_word_end_time:
+                            print(f" 单词{word}的开始时间{word_start}与前一个单词的结束时间{before_word_end_time}不匹配")
+                            word_start = before_word_end_time
+                    else:
+                        word_start = format_timestamp_ass(word_info["start"])
+                        word_end = format_timestamp_ass(word_info["end"])
+                        if before_word_end_time is not None and word_start != before_word_end_time:
+                            print(f" 单词{word}的开始时间{word_start}与前一个单词的结束时间{before_word_end_time}不匹配")
+                            word_start = before_word_end_time
+                    before_word_end_time = word_end
+
+                    # 重置临时变量
+                    temp_clip_str = ""
+                    temp_clip_start_time = None
+                    temp_clip_end_time = None
+
+                    #计算styled_current_word的start和end之间的时长（毫秒）
+                    current_word_duration = (parse_timestamp_ass(word_end) - parse_timestamp_ass(word_start)) * 1000
+
+                    # 添加样式信息
+                    styled_current_word = (
+                        r"{{\t(0,"+str(current_word_duration)+",\1c&H808080&\3c&HFF00FF&)}"
+                        f"{word}"                            
+                    )
+
+                    #循环word_list，将下标i前的元素拼接成一个字符串
+                    before_styled_word = f"{{\\c&HFF00FF&}}"
+                    for j in range(index_in_segments_text):
+                        before_styled_word += f" {sentence_word_list[j]}"
+                    if before_styled_word == f"{{\\c&HFF00FF&}}":
+                        before_styled_word = ""
+
+                    after_styled_word = ""
+                    #循环word_list，将下标i后的元素拼接成一个字符串
+                    after_styled_word = f"{{\\c&H808080&}}"
+                    for j in range(index_in_segments_text+1,len(sentence_word_list)):
+                        after_styled_word += f" {sentence_word_list[j]}"
+                    if after_styled_word == f"{{\\c&H808080&}}":
+                        after_styled_word = ""
+
+                    #将before_styled_word和styled_word和after_styled_word拼接成一个新的句子
+                    styled_sentence = f"{before_styled_word} {styled_current_word} {after_styled_word}"
+
+                    print(f" 生成句子: {styled_sentence}")
+
+                    # 构建新事件行
+                    new_line = (
+                        f"Dialogue: 0,{word_start},{word_end},"
+                        f"{style},,0,0,0,,{styled_sentence}"
+                    )
+                    print(f"生成新英文event: {new_line}")
+                    new_events.append(new_line)
+
+            # 生成新ASS内容
+            output_path = ass_path.with_name(f"{base_name}_sentence.ass")
+            with open(output_path, "w", encoding="utf-8") as f:
+                # 保留原文件头
+                header_end = ass_lines.index("[Events]") if "[Events]" in ass_lines else -1
+                if header_end != -1:
+                    f.write("\n".join(ass_lines[:header_end+1]))
+                
+                # 写入新事件
+                f.write("\n".join(new_events))
+                
+            print(f"生成动态行字幕: {output_path}")
+
+    ####################修改ass风格为单词单独显示######################
     def ass_to_single_word_style(self, folder_path: str) -> None:
         """
         处理ASS字幕文件，生成逐单词高亮版本
@@ -192,8 +319,8 @@ class SubtitleOptimizer:
                             print(f"大模型 单词：{word} 翻译结果: {cn_word}")
                     
                     # 转换时间格式
-                    word_start = self._format_timestamp_ass(word_info["start"])
-                    word_end = self._format_timestamp_ass(word_info["end"])
+                    word_start = format_timestamp_ass(word_info["start"])
+                    word_end = format_timestamp_ass(word_info["end"])
                     
 
                     # 添加样式信息
@@ -239,14 +366,6 @@ class SubtitleOptimizer:
                 f.write("\n".join(new_events))
                 
             print(f"生成逐单词字幕: {output_path}")
-
-    def _format_timestamp_ass(self, seconds: float) -> str:
-        """将秒数转换为ASS时间格式 (H:MM:SS.cc)"""
-        total_centiseconds = int(round(seconds * 100))
-        hours, remaining = divmod(total_centiseconds, 360000)
-        minutes, remaining = divmod(remaining, 6000)
-        seconds, centiseconds = divmod(remaining, 100)
-        return f"{hours}:{minutes:02}:{seconds:02}.{centiseconds:02}"
 
 
     ####################将srt转换为ass######################
@@ -1281,7 +1400,61 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         processed[-1] = len(alignment_path) - 1
         return sorted(list(set(processed)))[:num_splits+1]
     
+    ######################sqlite3#############################
+    def _get_translation(self, word: str) -> str:
+        """从数据库获取或生成翻译[5,11](@ref)"""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            
+            # 查询现有翻译
+            cursor.execute("SELECT translation FROM translations WHERE word=?", (word,))
+            result = cursor.fetchone()
+            
+            if result:
+                return result[0]
+            
+            # 调用API获取新翻译
+            word_translation = call_llm_api(f"请将单词{word}翻译成中文...")
+            cn_word = word_translation.strip()
+            
+            try:
+                # 插入新记录[1](@ref)
+                cursor.execute("INSERT INTO translations VALUES (?, ?)", (word, cn_word))
+                conn.commit()
+            except sqlite3.IntegrityError:
+                # 处理并发写入冲突
+                cursor.execute("SELECT translation FROM translations WHERE word=?", (word,))
+                return cursor.fetchone()[0]
+                
+            return cn_word
+    
+    def _init_db(self):
+        """初始化SQLite数据库和表结构[1,3](@ref)"""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute('''CREATE TABLE IF NOT EXISTS translations (
+                            word TEXT PRIMARY KEY,
+                            translation TEXT NOT NULL
+                         )''')
+            conn.commit()
 
+    def _save_translation(self, word: str, translation: str) -> None:
+        """保存或更新翻译记录"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                # 使用 UPSERT 语法处理重复键[1](@ref)
+                cursor.execute('''
+                    INSERT INTO translations (word, translation)
+                    VALUES (?, ?)
+                    ON CONFLICT(word) DO UPDATE SET
+                        translation = excluded.translation,
+                        created_at = CURRENT_TIMESTAMP
+                ''', (word, translation))
+                conn.commit()
+        except sqlite3.Error as e:
+            print(f"数据库保存失败: {e}")
+            raise
 
 def retry_on_permission_error(max_retries=3, delay=0.5):
     def decorator(func):

@@ -153,6 +153,32 @@ def time_stretch_audio(mp4_path: str, rate: float, gain_factor: float = 1.5):
             os.remove(temp_audio_path)
 
 
+def format_timestamp_ass( seconds: float) -> str:
+    """将秒数转换为ASS时间格式 (H:MM:SS.cc)"""
+    total_centiseconds = int(round(seconds * 100))
+    hours, remaining = divmod(total_centiseconds, 360000)
+    minutes, remaining = divmod(remaining, 6000)
+    seconds, centiseconds = divmod(remaining, 100)
+    return f"{hours}:{minutes:02}:{seconds:02}.{centiseconds:02}"
+
+
+def parse_timestamp_ass(timestamp_str: str) -> float:
+    """将ASS时间格式 (H:MM:SS.cc) 转换为秒数"""
+    try:
+        # 分割小时、分钟、秒和百分秒
+        time_parts, centiseconds = timestamp_str.split('.')
+        hours, minutes, seconds = map(int, time_parts.split(':'))
+        
+        # 计算总秒数（含小数部分）
+        total_seconds = (
+            hours * 3600
+            + minutes * 60
+            + seconds
+            + int(centiseconds) / 100
+        )
+        return total_seconds
+    except ValueError:
+        raise ValueError(f"无效的ASS时间格式: {timestamp_str}")
 
 def call_llm_api(
     prompt: str,
