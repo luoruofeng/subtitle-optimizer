@@ -40,7 +40,7 @@ class SubtitleOptimizer:
         self._init_db()
 
         ####################修改ass风格为单词渐变显示######################
-    def ass_to_sentence_style(self, folder_path: str) -> None:
+    def ass_to_sentence_underline_style(self, folder_path: str, current_word_style=r"{\bord3\3c&H000000}",blurred=False) -> None:
         """
         处理ASS字幕文件，生成逐单词高亮版本
         
@@ -172,28 +172,35 @@ class SubtitleOptimizer:
                     temp_clip_end_time = None
 
                     #计算styled_current_word的start和end之间的时长（毫秒）
-                    current_word_duration = (parse_timestamp_ass(word_end) - parse_timestamp_ass(word_start)) * 1000
+                    # current_word_duration = (parse_timestamp_ass(word_end) - parse_timestamp_ass(word_start)) * 1000
 
+                        # r"{\u1}"+ # 普通下划线
+                        #TODO r"{\bord0\shad0\3c&HFF00FF&\blur5}{\r}"可以模糊除了current_word外的单词
+                    
                     # 添加样式信息
                     styled_current_word = (
-                        r"{{\t(0,"+str(current_word_duration)+",\1c&H808080&\3c&HFF00FF&)}"
-                        f"{word}"                            
+                        current_word_style+
+                        f"{word.strip()}"+
+                        r"{\r}"
                     )
 
                     #循环word_list，将下标i前的元素拼接成一个字符串
-                    before_styled_word = f"{{\\c&HFF00FF&}}"
+                    before_styled_word = ""
                     for j in range(index_in_segments_text):
                         before_styled_word += f" {sentence_word_list[j]}"
-                    if before_styled_word == f"{{\\c&HFF00FF&}}":
-                        before_styled_word = ""
+                    before_styled_word = before_styled_word.strip()
+                    if blurred is True:
+                        before_styled_word = r"{\bord0\shad0\3c&HFF00FF&\blur5}"+before_styled_word+r"{\r}"
 
                     after_styled_word = ""
                     #循环word_list，将下标i后的元素拼接成一个字符串
-                    after_styled_word = f"{{\\c&H808080&}}"
+                    after_styled_word = ""
                     for j in range(index_in_segments_text+1,len(sentence_word_list)):
                         after_styled_word += f" {sentence_word_list[j]}"
-                    if after_styled_word == f"{{\\c&H808080&}}":
-                        after_styled_word = ""
+                    after_styled_word = after_styled_word.strip()
+                    if blurred is True:
+                        after_styled_word = r"{\bord0\shad0\3c&HFF00FF&\blur5}"+after_styled_word+r"{\r}"
+
 
                     #将before_styled_word和styled_word和after_styled_word拼接成一个新的句子
                     styled_sentence = f"{before_styled_word} {styled_current_word} {after_styled_word}"
@@ -209,7 +216,7 @@ class SubtitleOptimizer:
                     new_events.append(new_line)
 
             # 生成新ASS内容
-            output_path = ass_path.with_name(f"{base_name}_sentence.ass")
+            output_path = ass_path.with_name(f"{base_name}_underline.ass")
             with open(output_path, "w", encoding="utf-8") as f:
                 # 保留原文件头
                 header_end = ass_lines.index("[Events]") if "[Events]" in ass_lines else -1
@@ -261,7 +268,9 @@ class SubtitleOptimizer:
 
             # 处理事件行
             new_events = []
-            segment_idx = 0  # 分段数据索引
+            #将segments中的所有的words组合成all_words
+            all_words = [word for segment in segments for word in segment.get("words", [])]
+            current_word_index = 0
             
             for line in ass_lines:
                 if not line.startswith("Dialogue:"):
@@ -283,18 +292,74 @@ class SubtitleOptimizer:
                     print(f" 跳过中文行: {text}")
                     continue
 
-                # 获取对应分段
-                if segment_idx >= len(segments):
-                    print(f"分段数据不足，已处理 {segment_idx}/{len(segments)}")
-                    break
-                    
-                words = segments[segment_idx].get("words", [])
-                print(f" 处理分段: {words}")
-                segment_idx += 1
+                #从line获取内容
+                sentence = line.split(",", 9)[9].strip(" \t\r\n")
+                sentence_word_list = sentence.split(" ")
+                print(f" 处理句子: {sentence}")
 
+                # 重置临时变量
+                temp_clip_str = ""
+                temp_clip_start_time = None
+                temp_clip_end_time = None
+                before_word_end_time = None
                 # 生成逐单词字幕
-                for word_info in words:
+                for index_in_segments_text,sw in enumerate(sentence_word_list):
+                    word_info = all_words[current_word_index]
                     word = word_info.get("word")
+                    if not word:
+                        continue
+                    if sw.strip() != word.strip():
+                        print(f"单词{sw}与分段中的单词{word}不匹配")
+                        if word.strip() not in sw.strip():
+                            raise ValueError(f"单词{sw}与分段中的单词{word}不匹配")
+                        else:
+                            max_retry_counter = 0
+                            while True:
+                                if word.strip() not in sw.strip():
+                                    raise ValueError(f"单词{sw}与分段中的单词{word}不匹配")
+                                if max_retry_counter > 10:
+                                    raise ValueError(f"重试次数超过10次数 temp_cli_str:{temp_clip_str} 单词{sw}与分段中的单词{word}不匹配")
+                                temp_clip_str += word.strip()
+                                if temp_clip_start_time is None:
+                                    temp_clip_start_time = word_info["start"]
+                                    print(f" 生成拼接单词: {temp_clip_str} 开始时间: {temp_clip_start_time}")
+                                temp_clip_end_time = word_info["end"]
+                                print(f" 生成拼接单词: {temp_clip_str} 结束时间: {temp_clip_end_time}")
+                                if temp_clip_str != sw.strip():
+                                    current_word_index+=1
+                                    max_retry_counter+=1
+                                    word_info = all_words[current_word_index]
+                                    word = word_info.get("word")
+                                    print(f"单词{sw}与分段中的单词{word}不匹配")
+                                    continue   
+                                else:
+                                    word = temp_clip_str
+                                    print(f" 生成拼接单词: {temp_clip_str}")
+                                    break
+                    else:
+                        pass
+                    current_word_index+=1
+
+                    # 转换时间格式
+                    if temp_clip_start_time is not None and temp_clip_end_time is not None:
+                        word_start = format_timestamp_ass(temp_clip_start_time)
+                        word_end = format_timestamp_ass(temp_clip_end_time)
+                        if before_word_end_time is not None and word_start != before_word_end_time:
+                            print(f" 单词{word}的开始时间{word_start}与前一个单词的结束时间{before_word_end_time}不匹配")
+                            word_start = before_word_end_time
+                    else:
+                        word_start = format_timestamp_ass(word_info["start"])
+                        word_end = format_timestamp_ass(word_info["end"])
+                        if before_word_end_time is not None and word_start != before_word_end_time:
+                            print(f" 单词{word}的开始时间{word_start}与前一个单词的结束时间{before_word_end_time}不匹配")
+                            word_start = before_word_end_time
+                    before_word_end_time = word_end
+
+                    # 重置临时变量
+                    temp_clip_str = ""
+                    temp_clip_start_time = None
+                    temp_clip_end_time = None       
+
                     if not word:
                         continue
                     word = word.strip().lower()
@@ -316,12 +381,7 @@ class SubtitleOptimizer:
                             word_translation = call_llm_api(f"请将单词{word}翻译成简洁的中文含义,只回答翻译后的结果(如果有多个结果返最常用的2个结果并且用分号隔开),不要解释翻译的任何说明，不要回复任何与翻译无关的内容，不要冗余的重复问题")
                             cn_word = word_translation.strip()
                             self._save_translation(word, cn_word)
-                            print(f"大模型 单词：{word} 翻译结果: {cn_word}")
-                    
-                    # 转换时间格式
-                    word_start = format_timestamp_ass(word_info["start"])
-                    word_end = format_timestamp_ass(word_info["end"])
-                    
+                            print(f"大模型 单词：{word} 翻译结果: {cn_word}")             
 
                     # 添加样式信息
                     styled_word = (
@@ -341,15 +401,15 @@ class SubtitleOptimizer:
 
                     # 添加样式信息
                     styled_cn_word = (
-                        r"{\an5\fs21\c&HFFFFFF&}"
+                        r"{\an5\fs18\c&HFFFFFF&}"
                         f"{cn_word}"
-                        r"{\fs21\c&HFFFFFF&}"
+                        r"{\fs18\c&HFFFFFF&}"
                     )
 
                     # 构建新事件行
                     new_line = (
                         f"Dialogue: 0,{word_start},{word_end},"
-                        f"{cn_style},,0,0,60,,{styled_cn_word}"
+                        f"{cn_style},,0,0,140,,{styled_cn_word}"
                     )
                     print(f"生成新中文event: {new_line}")
                     new_events.append(new_line)
@@ -370,14 +430,16 @@ class SubtitleOptimizer:
 
     ####################将srt转换为ass######################
     def convert_srt_to_ass(self, srt_path: str, 
-        alignment: int = 6,  # 默认上方居中[3](@ref)
-        marginV: int = 0, 
+        cn_alignment: int = 1,  # 左下
+        en_alignment: int = 7, #左上
+        cn_marginV: int = 0, 
+        en_marginV: int = 0, 
         cn_fontsize: int = 12,
-        en_fontsize: int = 14,
+        en_fontsize: int = 19,
         cn_PrimaryColour: str = "&H0005CDF7",
         en_PrimaryColour: str = "&H0005CDF7",
-        en_outline:int = 6,
-        cn_outline:int = 3) -> None:
+        en_outline:int = 1,
+        cn_outline:int = 2) -> None:
         ass_style = f"""
 [Script Info]
 Title: Converted SRT to ASS
@@ -388,9 +450,9 @@ PlayDepth: 0
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,Arial,12,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,1,0,{alignment},0,0,{marginV},1
-Style: Chinese,AlibabaPuHuiTi-3-115-Black,{cn_fontsize},{cn_PrimaryColour},&H000000FF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,{cn_outline},0,{alignment},0,0,{marginV},1
-Style: English,Alibaba Sans Black,{en_fontsize},{en_PrimaryColour},&H000000FF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,{en_outline},0,{alignment},0,0,{marginV},1
+Style: Default,Arial,12,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,1,0,6,0,0,0,1
+Style: Chinese,AlibabaPuHuiTi-3-115-Black,{cn_fontsize},{cn_PrimaryColour},&H000000FF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,{cn_outline},0,{cn_alignment},0,0,{cn_marginV},1
+Style: English,Alibaba Sans Black,{en_fontsize},{en_PrimaryColour},&H000000FF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,{en_outline},0,{en_alignment},0,0,{en_marginV},1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
