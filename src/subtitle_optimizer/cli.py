@@ -30,6 +30,9 @@ def main():
     ass_to_underline_style_parser = subparsers.add_parser("ass-to-underline-style-in-folder", help="将ASS字幕转换为动态句子样式")
     ass_to_underline_style_parser.add_argument("-i", "--input", required=True, help="输入ASS字幕文件路径")
 
+    # 添加子命令：ass_to_sentence_ktv_style_in_folder
+    ass_to_sentence_ktv_style_in_folder_parser = subparsers.add_parser("ass-to-sentence-ktv-style-in-folder", help="将ASS字幕转换为KTV句子样式")
+    ass_to_sentence_ktv_style_in_folder_parser.add_argument("-i", "--input", required=True, help="输入ASS字幕文件路径")
 
     # 添加子命令：convert_srt_to_ass
     convert_srt_to_ass_parser = subparsers.add_parser("convert-srt-to-ass", help="srt字幕转ass字幕")
@@ -115,6 +118,12 @@ def main():
         handle_ass_to_single_word_style(args)
     elif args.command == "ass-to-underline-style-in-folder":
         handle_ass_to_underline_style(args)
+    elif args.command == "ass-to-sentence-ktv-style-in-folder":
+        handle_ass_to_sentence_ktv_style(args)
+
+def handle_ass_to_sentence_ktv_style(args):
+    print(f"📝 字幕样式转换：将ASS字幕转换为KTV句子样式\n输入={args.input}")
+    OPTIMIZER.ass_to_sentence_ktv_style(args.input)
 
 def handle_ass_to_underline_style(args):
     print(f"📝 字幕样式转换：将ASS字幕转换为动态句子样式\n输入={args.input}")

@@ -39,8 +39,184 @@ class SubtitleOptimizer:
         self.db_path = Path("translations.db")
         self._init_db()
 
-        ####################修改ass风格为单词渐变显示######################
-    def ass_to_sentence_underline_style(self, folder_path: str, current_word_style=r"{\bord3\3c&H000000}",blurred=False) -> None:
+
+    ####################修改ass风格为歌词渐变显示######################
+    def ass_to_sentence_ktv_style(self, folder_path: str,retain_cn=True) -> None:
+        """
+        处理ASS字幕文件，生成每行单词ktv字幕效果
+        
+        参数:
+            folder_path (str): 包含ASS/MP4/分段文件的文件夹路径
+        """
+        folder = Path(folder_path)
+        if not folder.exists():
+            raise FileNotFoundError(f"路径不存在: {folder_path}")
+
+        for ass_path in folder.glob("*.ass"):
+            # 检查配套文件
+            base_name = ass_path.stem
+            mp4_path = ass_path.with_suffix(".mp4")
+            segments_path = ass_path.with_name(f"{base_name}_segments.txt")
+            
+            if not (mp4_path.exists() and segments_path.exists()):
+                print(f"跳过 {base_name}: 缺少MP4或分段文件")
+                continue
+
+            # 加载分段数据
+            try:
+                with open(segments_path, "r", encoding="utf-8") as f:
+                    segments = json.load(f)
+            except Exception as e:
+                print(f"加载分段文件失败: {segments_path} ({e})")
+                continue
+
+            # 解析ASS文件
+            try:
+                with open(ass_path, "r", encoding="utf-8") as f:
+                    ass_lines = [line.strip() for line in f]
+            except Exception as e:
+                print(f"读取ASS失败: {ass_path} ({e})")
+                continue
+
+            # 处理事件行
+            new_events = []
+            #将segments中的所有的words组合成all_words
+            all_words = [word for segment in segments for word in segment.get("words", [])]
+            current_word_index = 0
+            
+            for line in ass_lines:
+                if not line.startswith("Dialogue:"):
+                    continue
+                    
+                # 解析ASS行
+                print(f"处理ASS行: {line}")
+                parts = line.split(",", 9)
+                if len(parts) < 10:
+                    continue
+                    
+                start, end, style = parts[1:4]
+                cn_style="Chinese"
+                text = parts[9].strip(" \t\r\n")
+
+                # 中文行保留原样
+                if re.search(r'[\u4e00-\u9fff]', text):
+                    if retain_cn is True:
+                        new_events.append(line)
+                        print(f" 跳过中文行: {text}")
+                        continue
+                    else:
+                        print(f" 跳过中文行: {text}")
+
+                #从line获取内容
+                sentence = line.split(",", 9)[9].strip(" \t\r\n")
+                sentence_word_list = sentence.split(" ")
+                print(f" 处理英文句子: {sentence}")
+
+                # 重置临时变量
+                temp_clip_str = ""
+                temp_clip_start_time = None
+                temp_clip_end_time = None
+                before_word_end_time = None
+                # 计算每一行字幕的每个单词的展示时间（厘秒）
+                word_k_list = []
+                for index_in_segments_text,sw in enumerate(sentence_word_list):
+                    word_info = all_words[current_word_index]
+                    word = word_info.get("word")
+                    if not word:
+                        continue
+                    if sw.strip() != word.strip():
+                        print(f"单词{sw}与分段中的单词{word}不匹配")
+                        if word.strip() not in sw.strip():
+                            raise ValueError(f"单词{sw}与分段中的单词{word}不匹配")
+                        else:
+                            max_retry_counter = 0
+                            while True:
+                                if word.strip() not in sw.strip():
+                                    raise ValueError(f"单词{sw}与分段中的单词{word}不匹配")
+                                if max_retry_counter > 10:
+                                    raise ValueError(f"重试次数超过10次数 temp_cli_str:{temp_clip_str} 单词{sw}与分段中的单词{word}不匹配")
+                                temp_clip_str += word.strip()
+                                if temp_clip_start_time is None:
+                                    temp_clip_start_time = word_info["start"]
+                                    print(f" 生成拼接单词: {temp_clip_str} 开始时间: {temp_clip_start_time}")
+                                temp_clip_end_time = word_info["end"]
+                                print(f" 生成拼接单词: {temp_clip_str} 结束时间: {temp_clip_end_time}")
+                                if temp_clip_str != sw.strip():
+                                    current_word_index+=1
+                                    max_retry_counter+=1
+                                    word_info = all_words[current_word_index]
+                                    word = word_info.get("word")
+                                    print(f"单词{sw}与分段中的单词{word}不匹配")
+                                    continue   
+                                else:
+                                    word = temp_clip_str
+                                    print(f" 生成拼接单词: {temp_clip_str}")
+                                    break
+                    else:
+                        pass
+                    current_word_index+=1
+
+                    # 转换时间格式
+                    if temp_clip_start_time is not None and temp_clip_end_time is not None:
+                        word_start = format_timestamp_ass(temp_clip_start_time)
+                        word_end = format_timestamp_ass(temp_clip_end_time)
+                        if before_word_end_time is not None and word_start != before_word_end_time:
+                            print(f" 单词{word}的开始时间{word_start}与前一个单词的结束时间{before_word_end_time}不匹配")
+                            word_start = before_word_end_time
+                    else:
+                        word_start = format_timestamp_ass(word_info["start"])
+                        word_end = format_timestamp_ass(word_info["end"])
+                        if before_word_end_time is not None and word_start != before_word_end_time:
+                            print(f" 单词{word}的开始时间{word_start}与前一个单词的结束时间{before_word_end_time}不匹配")
+                            word_start = before_word_end_time
+                    before_word_end_time = word_end
+
+                    # 重置临时变量
+                    temp_clip_str = ""
+                    temp_clip_start_time = None
+                    temp_clip_end_time = None
+
+                    #计算styled_current_word的start和end之间的时长（毫秒）
+                    current_word_duration = (parse_timestamp_ass(word_end) - parse_timestamp_ass(word_start)) * 1000
+
+                    k = round(current_word_duration / 10, 2)
+                    word_k_list.append((word, k))
+
+
+                #每行字幕持续的时间
+                current_sentence_duration = (parse_timestamp_ass(end) - parse_timestamp_ass(start)) * 1000
+                # 添加样式信息
+                # styled_sentence = r"{\t(0,"+str("{:.2f}".format(current_sentence_duration))+r",\1c&HFF00FF&\3c&H00FFFF)}"
+                styled_sentence = ""
+                for (word,k) in word_k_list:
+                    styled_sentence += r"{\kf"+str(k)+r"}"+word.strip()+" "
+
+                print(f" 生成ass字幕: {styled_sentence}")
+
+                # 构建新事件行
+                new_line = (
+                    f"Dialogue: 0,{start},{end},"
+                    f"{style},,0,0,0,,{styled_sentence}"
+                )
+                print(f"生成新英文event: {new_line}")
+                new_events.append(new_line)
+
+            # 生成新ASS内容
+            output_path = ass_path.with_name(f"{base_name}_ktv.ass")
+            with open(output_path, "w", encoding="utf-8") as f:
+                # 保留原文件头
+                header_end = ass_lines.index("[Events]") if "[Events]" in ass_lines else -1
+                if header_end != -1:
+                    f.write("\n".join(ass_lines[:header_end+1]))
+                
+                # 写入新事件
+                f.write("\n".join(new_events))
+                
+            print(f"生成动态行字幕: {output_path}")
+
+
+    ####################修改ass风格为重点显示一行中的当前单词渐变显示######################
+    def ass_to_sentence_underline_style(self, folder_path: str, current_word_style=r"{\bord3\3c&H000000}",blurred=False,retain_cn=True) -> None:
         """
         处理ASS字幕文件，生成逐单词高亮版本
         
@@ -99,9 +275,12 @@ class SubtitleOptimizer:
 
                 # 中文行保留原样
                 if re.search(r'[\u4e00-\u9fff]', text):
-                    new_events.append(line)
-                    print(f" 跳过中文行: {text}")
-                    continue
+                    if retain_cn is True:
+                        new_events.append(line)
+                        print(f" 跳过中文行: {text}")
+                        continue
+                    else:
+                        print(f" 跳过中文行: {text}")
 
                 #从line获取内容
                 sentence = line.split(",", 9)[9].strip(" \t\r\n")
@@ -216,7 +395,10 @@ class SubtitleOptimizer:
                     new_events.append(new_line)
 
             # 生成新ASS内容
-            output_path = ass_path.with_name(f"{base_name}_underline.ass")
+            if blurred is True:
+                output_path = ass_path.with_name(f"{base_name}_underline_blurred.ass")
+            else:
+                output_path = ass_path.with_name(f"{base_name}_underline.ass")
             with open(output_path, "w", encoding="utf-8") as f:
                 # 保留原文件头
                 header_end = ass_lines.index("[Events]") if "[Events]" in ass_lines else -1
@@ -401,9 +583,9 @@ class SubtitleOptimizer:
 
                     # 添加样式信息
                     styled_cn_word = (
-                        r"{\an5\fs18\c&HFFFFFF&}"
+                        r"{\an5\fs14\c&HFFFFFF&}"
                         f"{cn_word}"
-                        r"{\fs18\c&HFFFFFF&}"
+                        r"{\fs14\c&HFFFFFF&}"
                     )
 
                     # 构建新事件行
